@@ -240,16 +240,15 @@ window.VOX_LOGINS = ['google'];
     const offsetRef = c.rtdb.ref('.info/serverTimeOffset');
     const onOffset = s => { serverOffset = Number(s.val()) || 0; };
     offsetRef.on('value', onOffset);
+    /* send your newest state right away: updates go out in order without waiting for the last one to be confirmed
+       (waiting made movement pile up and arrive late). The "remove me when I disconnect" rule is set once per connection. */
+    let discArmed = false;
     const publish = () => {
-      writeQueue = writeQueue.catch(() => {}).then(async () => {
-        if (closed || !joinedPresence) return;
-        /* Register cleanup before every write, including after a reconnect. */
-        await me.onDisconnect().remove();
-        if (!closed) await me.set({ by: c.user.uid, j: JSON.stringify(mine), t: firebase.database.ServerValue.TIMESTAMP });
-      });
-      return writeQueue;
+      if (closed || !joinedPresence) return Promise.resolve();
+      if (!discArmed){ discArmed = true; me.onDisconnect().remove().catch(() => { discArmed = false; }); }
+      return me.set({ by: c.user.uid, j: JSON.stringify(mine), t: firebase.database.ServerValue.TIMESTAMP }).catch(() => {});
     };
-    const onConnected = s => { if (s.val() === true) publish().catch(() => {}); };
+    const onConnected = s => { if (s.val() === true){ discArmed = false; publish(); } };
     connectedRef.on('value', onConnected);
     const heartbeat = setInterval(() => { if (joinedPresence) publish().catch(() => {}); }, 20000);
     const t0 = Date.now();
@@ -3098,7 +3097,7 @@ onmessage = e => {
   } catch (err){ postMessage({ t: 'err', msg: String((err && err.message) || err), cx: m.cx, cz: m.cz, kind: m.t }); }
 };
 </script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" crossorigin="anonymous"></script>
 <script>
 (() => {
 /* ============ styles the game adds while it runs always come after the page's own styles.
@@ -4221,7 +4220,15 @@ function buildMeshData(cx, cz){
 /* ============ renderer, materials ============ */
 buildAtlas();
 const canvas = document.getElementById('c');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+const renderer = (() => {
+  /* some iPads refuse to start 3D graphics when memory is low (Low Power Mode, lots of apps or game tabs open): try lighter settings first */
+  let last = null;
+  for (const o of [{ powerPreference: 'high-performance' }, { powerPreference: 'default' }, { powerPreference: 'low-power', precision: 'mediump' }]){
+    try { return new THREE.WebGLRenderer(Object.assign({ canvas, antialias: false }, o)); } catch (e){ last = e; }
+  }
+  try { gfxFail(); } catch (e){}
+  throw new Error('Voxora: your device could not start 3D graphics (' + ((last && last.message) || 'unknown') + ')');
+})();
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
 renderer.autoClear = false;
 const scene = new THREE.Scene();
@@ -5673,9 +5680,10 @@ function updateAvatars(dt){
 }
 let presT = 0, lastPres = '', presBeat = 0;
 function sendPresence(dt){
-  if (!NET.wroom || !started) return; presT -= dt; presBeat -= dt; if (presT > 0) return; presT = .1;
+  if (!NET.wroom || !started) return; presT -= dt; presBeat -= dt; if (presT > 0) return; presT = window.VOX_FIREBASE ? .066 : .1;   /* 15 updates a second on the website */
   const pr = { p: [+pos.x.toFixed(2), +pos.y.toFixed(2), +pos.z.toFixed(2)], r: [+yaw.toFixed(2), +pitch.toFixed(2)], f: flying ? 1 : 0, k: lookCode(myLook), n: myName().slice(0, 16), s: gameMode === 'spectator' ? 1 : 0, sw: ANIM_ME.cnt, ko: RUN.ko || undefined, dv: DEV.kind };
   const s = JSON.stringify(pr); if (s === lastPres && presBeat > 0) return; lastPres = s; presBeat = 4;
+  pr.tm = Math.round(performance.now());   /* when this was sent, so others can play your movement back exactly */
   NET.wroom.presence(pr).catch(() => {});
 }
 const playersByName = q => { q = q.toLowerCase(); return [...avatars.values()].filter(a => a.name.toLowerCase().startsWith(q)); };
@@ -5835,7 +5843,7 @@ async function connectNet(){
   renderWorldList();
   if (!window.claude || !window.claude.use){ $('netStatus').textContent = 'Offline. Worlds you make here are not saved.'; renderSide(); return; }
   const [db, room, user] = await Promise.all([claude.use('db'), claude.use('room'), claude.use('user')]);
-  NET.db = db; NET.room = room; NET.user = user; NET.solo = !db;
+  NET.db = safeNS(db); NET.room = safeNS(room); NET.user = user; NET.solo = !db;
   if (user){ NET.myId = await user.id(); NET.canWrite = await user.can('data.write'); }
   if (db){
     db.collection('index').orderBy('created', 'desc').limit(100).onSnapshot(s => {
@@ -6943,17 +6951,17 @@ function openCharacter(){
   draftLook = Object.assign({}, myLook);
   $('charModal').hidden = false; if (started) openModal('charModal'); else releaseLock();
   if (!charR){
-    charR = new THREE.WebGLRenderer({ canvas: $('charCanvas'), antialias: true, alpha: true }); charR.setPixelRatio(Math.min(2, devicePixelRatio || 1));
+    try { charR = new THREE.WebGLRenderer({ canvas: $('charCanvas'), antialias: true, alpha: true }); charR.setPixelRatio(Math.min(2, devicePixelRatio || 1)); } catch (e){ charR = null; console.error('[Voxora] character preview graphics could not start:', e && e.message); }
     charScene = new THREE.Scene(); charScene.add(new THREE.HemisphereLight(0xffffff, 0x554477, 1)); const d = new THREE.DirectionalLight(0xffffff, .6); d.position.set(2, 3, 4); charScene.add(d);
     charCam = new THREE.PerspectiveCamera(32, 300 / 380, .1, 50); charCam.position.set(0, 1.25, 4.6); charCam.lookAt(0, 1.05, 0);
-    const cv = $('charCanvas');
+    const cv = $('charCanvas'); if (!cv.dataset.wired){ cv.dataset.wired = '1';
     cv.addEventListener('pointerdown', e => { charDrag = e.clientX; try { cv.setPointerCapture(e.pointerId); } catch (_){} });
     cv.addEventListener('pointermove', e => { if (charDrag !== null){ charSpin += (e.clientX - charDrag) * .015; charDrag = e.clientX; } });
-    cv.addEventListener('pointerup', () => { charDrag = null; }); cv.addEventListener('pointercancel', () => { charDrag = null; });
+    cv.addEventListener('pointerup', () => { charDrag = null; }); cv.addEventListener('pointercancel', () => { charDrag = null; }); }
   }
   renderCharOpts(); rebuildPreview();
   cancelAnimationFrame(charLoop); const t0 = performance.now();
-  const loop = now => { if ($('charModal').hidden) return; if (charDrag === null) charSpin += .008; if (charModel){ charModel.g.rotation.y = charSpin; const s = Math.sin((now - t0) / 500) * .12; charModel.armL.rotation.x = s; charModel.armR.rotation.x = -s; charModel.headPivot.rotation.x = Math.sin((now - t0) / 1300) * .08; } charR.render(charScene, charCam); charLoop = requestAnimationFrame(loop); };
+  const loop = now => { if ($('charModal').hidden) return; if (charDrag === null) charSpin += .008; if (charModel){ charModel.g.rotation.y = charSpin; const s = Math.sin((now - t0) / 500) * .12; charModel.armL.rotation.x = s; charModel.armR.rotation.x = -s; charModel.headPivot.rotation.x = Math.sin((now - t0) / 1300) * .08; } charR && charR.render(charScene, charCam); charLoop = requestAnimationFrame(loop); };
   charLoop = requestAnimationFrame(loop);
 }
 function rebuildPreview(){ if (charModel) charScene.remove(charModel.g); charModel = buildCharacter(draftLook); charModel.g.position.y = -.05; charScene.add(charModel.g); }
@@ -15129,8 +15137,7 @@ setInterval(() => {
   if (!a){ if (performance.now() - SPEC.since > 25000){ toast(SPEC.nick + ' left. Stopped spectating.'); stopSpectate(); } return; }
   SPEC.since = performance.now();
   if (gameMode !== 'spectator'){ SPEC.prev = SPEC.prev || gameMode; setMode('spectator'); }
-  const dx = pos.x - a.cur.x, dz = pos.z - a.cur.z, dy = pos.y - a.cur.y;
-  if (Math.hypot(dx, dz) > 7 || Math.abs(dy) > 6){ const yaw = a.yaw || 0; teleport(a.cur.x + Math.sin(yaw) * 4, a.cur.y + 2.5, a.cur.z + Math.cos(yaw) * 4); }
+  /* the camera itself follows them smoothly every frame (see the spectate camera) */
 }, 400);
 { const _lw = leaveWorld; leaveWorld = function(switching){ if (!switching && SPEC.id && !SPEC.leaving){ SPEC.id = null; SPEC.prev = null; specBar(); } return _lw.apply(this, arguments); }; }
 
@@ -17784,10 +17791,10 @@ html .side .stop.hasgear .slogo{font-size:clamp(17px,calc((var(--sidew, 300px) -
   renderSideNow = async function(){
     const r = await _rs.apply(this, arguments);
     try {
-      list.innerHTML = '';
+      const out = [];
       const online = new Map(); for (const p of lobbyPeers) if (p.kind === 'viewer' && p.by && p.by !== NET.myId) online.set(p.by, p.presence || {});
       const recent = load().filter(x => !friends.includes(x.id)).slice(0, 3);
-      if (!recent.length){ const n = document.createElement('p'); n.className = 'fnote'; n.textContent = 'People you play with show up here. Or search a name above.'; list.appendChild(n); return r; }
+      if (!recent.length){ const n = document.createElement('p'); n.className = 'fnote'; n.textContent = 'People you play with show up here. Or search a name above.'; list.replaceChildren(n); return r; }
       const ids = recent.map(x => x.id);
       await Promise.all(ids.filter(id => !nickCache.has(id)).map(id => fetchNick(id).catch(() => {})));
       const ps = NET.user ? await NET.user.profiles(ids) : {};
@@ -17801,8 +17808,9 @@ html .side .stop.hasgear .slogo{font-size:clamp(17px,calc((var(--sidew, 300px) -
         row.append(av, fi);
         if (inGame && lobbyIsPublic(pr.w)){ const j = document.createElement('button'); j.className = 'fbtn'; j.textContent = 'Join'; j.addEventListener('click', () => joinWorldById(pr.w)); row.appendChild(j); }
         if (NET.db){ const a = document.createElement('button'); a.className = 'fbtn alt'; const req = reqOut.includes(id); a.textContent = req ? 'Requested' : '+ Add'; a.addEventListener('click', () => req ? cancelRequest(id) : sendRequest(id)); row.appendChild(a); }
-        list.appendChild(row);
+        out.push(row);
       }
+      list.replaceChildren(...out);   /* swap in all at once: no blank flash while names load */
     } catch (e){}
     return r;
   };
@@ -18123,6 +18131,247 @@ body:not(.playing) #settings .vtab[data-t=world]{display:none}
       if (want !== amGameOwner){ amGameOwner = want; $('adminBtn').hidden = !want; try { staffUI(); } catch (e){} }
     } catch (e){}
   }, 1000);
+}
+
+/* ---- names stay current: when someone changes their name, everyone sees the new one right away
+   (friends list, recently played, requests, the admin panel, spectating, name tags) ---- */
+{
+  const watched = new Map(), MAX = 80;
+  let rt = 0;
+  const refresh = () => {
+    clearTimeout(rt);
+    rt = setTimeout(() => {
+      try { renderSide(); } catch (e){}
+      try { if ($('adminPanel') && !$('adminPanel').hidden) renderAdmin(); } catch (e){}
+    }, 250);
+  };
+  const setDir = (id, n) => {
+    for (const L of [typeof lookDir !== 'undefined' ? lookDir : null, typeof lookDirCache !== 'undefined' ? lookDirCache : null])
+      if (Array.isArray(L)){ const e = L.find(p => p && p.id === id); if (e) e.nick = n; }
+  };
+  const watch = id => {
+    if (!id || typeof id !== 'string' || id === NET.myId || watched.has(id) || !NET.db || watched.size >= MAX) return;
+    try {
+      const un = NET.db.doc('looks/' + id).onSnapshot(s => {
+        const v = s && s.exists ? (s.data() || {}) : null; if (!v) return;
+        const n = cleanNick(v.nick || ''); let changed = false;
+        if (n && nickCache.get(id) !== n){ nickCache.set(id, n); setDir(id, n); changed = true; }
+        if (typeof v.code === 'string' && lookCache.get(id) !== v.code){ lookCache.set(id, v.code); changed = true; }
+        if (changed) refresh();
+      }, () => {});
+      watched.set(id, typeof un === 'function' ? un : () => {});
+    } catch (e){}
+  };
+  window.__vxWatchNick = watch;
+  const _fn = fetchNick;
+  fetchNick = async function(id){ try { watch(id); } catch (e){} return _fn.apply(this, arguments); };
+  /* names that arrive with someone's live status (the lobby and the world) win right away too */
+  const fromPresence = (id, n) => { n = cleanNick(n || ''); if (id && n && nickCache.get(id) !== n){ nickCache.set(id, n); setDir(id, n); refresh(); } };
+  setInterval(() => {
+    try {
+      if (!NET.db) return;
+      for (const id of friends) watch(id);
+      for (const r of reqIn) watch(r && r.from);
+      for (const a of avatars.values()){ if (a.by){ watch(a.by); if (a.real) fromPresence(a.by, a.real); } }
+      for (const p of (typeof lobbyPeers !== 'undefined' ? lobbyPeers : [])) if (p && p.by && p.by !== NET.myId && p.presence) fromPresence(p.by, p.presence.n);
+    } catch (e){}
+  }, 2000);
+}
+
+/* ---- the friends list only redraws when something actually changed (no more blinking every few seconds) ---- */
+{
+  const sig = box => [...box.children].map(r => (r.textContent || '') + '|' + [...r.querySelectorAll('img')].map(i => i.getAttribute('src') || '').join(',') + '|' + [...r.querySelectorAll('.stdot')].map(d => d.className).join(',')).join('\n');
+  const _rs = renderSideNow;
+  let lastRun = 0, later = 0;
+  renderSideNow = async function(){
+    const now = Date.now();
+    if (now - lastRun < 700){ clearTimeout(later); later = setTimeout(() => renderSideNow(), 700 - (now - lastRun)); return; }
+    lastRun = now;
+    const boxes = ['flist', 'rlist', 'recentP'].map(id => $(id)).filter(Boolean);
+    const before = boxes.map(b => ({ b, s: sig(b), nodes: [...b.childNodes] }));
+    const r = await _rs.apply(this, arguments);
+    await Promise.resolve();
+    for (const x of before) try { if (x.nodes.length && sig(x.b) === x.s) x.b.replaceChildren(...x.nodes); } catch (e){}
+    return r;
+  };
+}
+
+/* ---- spectating: a smooth camera that follows behind the player and looks at them.
+   Drag to look around them; after a moment it eases back behind them. ---- */
+{
+  let saved = null, userT = 0, setY = null, setP = null, lastT = performance.now();
+  const tick = () => {
+    requestAnimationFrame(tick);
+    const now = performance.now(), dt = Math.min(.1, (now - lastT) / 1000); lastT = now;
+    try {
+      const on = !!(SPEC.id && started && gameMode === 'spectator');
+      if (!on){ if (saved !== null){ camMode = saved; saved = null; } setY = null; return; }
+      let a = null; for (const x of avatars.values()) if (x.by === SPEC.id) a = x;
+      if (!a) return;
+      if (saved === null){ saved = camMode; camMode = 1; }
+      if (setY !== null && (Math.abs(yaw - setY) > 1e-4 || Math.abs(pitch - setP) > 1e-4)) userT = now;   /* you looked around */
+      if (now - userT > 1800){
+        const k = 1 - Math.exp(-dt * 2.5); let d = (a.ryaw !== undefined ? a.ryaw : a.yaw || 0) - yaw; d = Math.atan2(Math.sin(d), Math.cos(d));
+        yaw += d * k; pitch += (-.3 - pitch) * k;
+      }
+      const tx = a.cur.x, ty = a.cur.y, tz = a.cur.z, far = (pos.x - tx) ** 2 + (pos.y - ty) ** 2 + (pos.z - tz) ** 2 > 400;
+      if (far) pos.set(tx, ty, tz);
+      else { const k = 1 - Math.exp(-dt * 20); pos.x += (tx - pos.x) * k; pos.y += (ty - pos.y) * k; pos.z += (tz - pos.z) * k; }
+      prev.copy(pos); vel.set(0, 0, 0);
+      setY = yaw; setP = pitch;
+      const nm = a.real || a.name; if (nm && nm !== SPEC.nick){ SPEC.nick = nm; const b = document.querySelector('#specBar b'); if (b) b.textContent = nm; }
+    } catch (e){}
+  };
+  requestAnimationFrame(tick);
+}
+
+/* ---- other players move smoothly and exactly how they really moved:
+   positions are played back from a short buffer (about a tenth of a second behind) using the time they were sent,
+   instead of guessing ahead (guessing made people overshoot and snap back) ---- */
+{
+  const lerpA = (a, b, k) => { let d = b - a; d = Math.atan2(Math.sin(d), Math.cos(d)); return a + d * k; };
+  const _ua = upsertAvatar;
+  upsertAvatar = async function(p){
+    const at = performance.now();
+    const r = await _ua.apply(this, arguments);
+    try {
+      const pr = (p && p.presence) || {}, P = Array.isArray(pr.p) ? pr.p : null, a = p && avatars.get(p.peer);
+      if (!a || !P || P.length !== 3 || !P.every(Number.isFinite)) return r;
+      const R = Array.isArray(pr.r) ? pr.r : [0, 0];
+      const tm = Number.isFinite(pr.tm) ? pr.tm : at;
+      if (!a.buf) a.buf = [];
+      const last = a.buf[a.buf.length - 1];
+      if (last && tm === last.tm) return r;                                  /* same update twice */
+      if (last && tm < last.tm - 1000){ a.buf = []; a.offs = []; }   /* their page reloaded */
+      else if (last && tm < last.tm) return r;                      /* an old update that arrived late */
+      const snap = { tm, x: P[0], y: P[1], z: P[2], yaw: +R[0] || 0, pitch: +R[1] || 0 };
+      const L2 = a.buf[a.buf.length - 1];
+      if (L2 && ((snap.x - L2.x) ** 2 + (snap.y - L2.y) ** 2 + (snap.z - L2.z) ** 2) > 100) a.buf = [];   /* teleported: jump there */
+      else if (L2 && tm - L2.tm > 250) a.buf.push(Object.assign({}, L2, { tm: tm - 70 }));          /* they stood still, then started moving */
+      a.buf.push(snap); if (a.buf.length > 40) a.buf.splice(0, a.buf.length - 40);
+      if (!a.offs) a.offs = [];
+      a.offs.push(at - tm); if (a.offs.length > 40) a.offs.shift();
+      a.hasTm = Number.isFinite(pr.tm);
+    } catch (e){}
+    return r;
+  };
+  const _upd = updateAvatars;
+  updateAvatars = function(dt){
+    const now = performance.now();
+    for (const a of avatars.values()){
+      try {
+        const B = a.buf; if (!B || !B.length) continue;
+        let off = 0, jit = 0;
+        if (a.offs && a.offs.length){ off = Math.min(...a.offs); jit = a.offs.reduce((s, v) => s + (v - off), 0) / a.offs.length; }
+        const base = a.hasTm ? (window.VOX_FIREBASE ? 70 : 100) : 130;
+        const delay = Math.max(50, Math.min(300, base + jit * 1.1));
+        const t = now - off - delay;
+        let x, y, z, yw, pt;
+        if (t <= B[0].tm){ ({ x, y, z, yaw: yw, pitch: pt } = B[0]); }
+        else {
+          let i = B.length - 1; while (i > 0 && B[i - 1].tm > t) i--;
+          const s1 = B[i], s0 = B[i - 1];
+          if (s0 && t <= s1.tm){
+            const k = (t - s0.tm) / Math.max(1, s1.tm - s0.tm);
+            x = s0.x + (s1.x - s0.x) * k; y = s0.y + (s1.y - s0.y) * k; z = s0.z + (s1.z - s0.z) * k;
+            yw = lerpA(s0.yaw, s1.yaw, k); pt = s0.pitch + (s1.pitch - s0.pitch) * k;
+          } else {
+            /* newest update is a bit late: keep going the same way for a moment, then wait */
+            const sN = B[B.length - 1], sP = B[B.length - 2], ahead = Math.min(120, t - sN.tm);
+            x = sN.x; y = sN.y; z = sN.z; yw = sN.yaw; pt = sN.pitch;
+            if (sP && ahead > 0){ const g = Math.max(1, sN.tm - sP.tm), f = ahead / g; x += (sN.x - sP.x) * f; y += (sN.y - sP.y) * f * .5; z += (sN.z - sP.z) * f; }
+          }
+          while (B.length > 3 && B[1].tm < t - 400) B.shift();
+        }
+        a.cur.set(x, y, z); a.tgt.set(x, y, z); if (a.vel) a.vel.set(0, 0, 0); a.lastT = now; a.yaw = yw; a.pitch = pt;
+      } catch (e){}
+    }
+    return _upd.apply(this, arguments);
+  };
+}
+
+/* ---- chat: when older messages scroll off the top they fade out softly instead of being cut in half ---- */
+{
+  const st = document.createElement('style');
+  st.textContent = '#chatLog.ovf{-webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 26px);mask-image:linear-gradient(to bottom,transparent 0,#000 26px)}';
+  document.head.appendChild(st);
+  const log = $('chatLog');
+  if (log){
+    const upd = () => log.classList.toggle('ovf', log.scrollTop > 2 && log.scrollHeight > log.clientHeight + 2);
+    log.addEventListener('scroll', upd, { passive: true });
+    new MutationObserver(() => requestAnimationFrame(upd)).observe(log, { childList: true });
+    setInterval(upd, 1000);
+  }
+}
+
+/* ---- chat box hint fits on phones (it was cut off: "…for comma") ---- */
+{
+  const ci = $('chatInput');
+  if (ci){
+    const full = ci.getAttribute('placeholder') || 'Say something, or type / for commands';
+    const fit = () => { const w = ci.clientWidth || 0; ci.setAttribute('placeholder', w && w < 430 ? 'Chat, or / for commands' : full); };
+    addEventListener('resize', fit); new MutationObserver(fit).observe(document.body, { attributes: true, attributeFilter: ['class'] }); setInterval(fit, 1500); fit();
+  }
+}
+
+/* ---- safety net for updates the Claude app (or the website's database) sends the game.
+   If the game's code fails while handling one, it's caught and written to the console with the real message,
+   instead of crashing as a nameless "Script error." ---- */
+function safeNS(t){
+  if (!t || (typeof t !== 'object' && typeof t !== 'function') || t.__vxSafe) return t;
+  const CHAIN = new Set(['doc', 'collection', 'where', 'orderBy', 'limit', 'limitToLast', 'startAt', 'startAfter', 'endAt', 'endBefore', 'collectionGroup']);
+  const CB = new Set(['onSnapshot', 'onPeers', 'on']);
+  const w = Object.create(t), names = new Set();
+  for (let o = t; o && o !== Object.prototype && o !== Function.prototype; o = Object.getPrototypeOf(o)) for (const k of Object.getOwnPropertyNames(o)) names.add(k);
+  for (const k of names){
+    if (k === 'constructor' || k === '__proto__') continue;
+    let v; try { v = t[k]; } catch (e){ continue; }
+    if (typeof v === 'function'){
+      Object.defineProperty(w, k, { configurable: true, value: function(...args){
+        if (CB.has(k)) args = args.map(a => typeof a === 'function' ? vxGuard(a, k) : a);
+        const r = v.apply(t, args);
+        if (k === 'join' && r && typeof r.then === 'function') return r.then(safeNS);
+        return CHAIN.has(k) ? safeNS(r) : r;
+      } });
+    } else {
+      Object.defineProperty(w, k, { configurable: true, get(){ return t[k]; } });   /* read through the real object */
+    }
+  }
+  Object.defineProperty(w, '__vxSafe', { value: true });
+  return w;
+}
+function vxGuard(fn, where){
+  return function(...a){
+    try { return fn.apply(this, a); }
+    catch (e){ try { console.error('[Voxora] ' + where + ' update failed: ' + ((e && e.message) || e), e && e.stack ? '\n' + e.stack.split('\n').slice(0, 4).join('\n') : ''); } catch (_){} }
+  };
+}
+/* the game's graphics couldn't start at all: say what to do instead of showing nothing */
+function gfxFail(){
+  if (document.getElementById('gfxFail')) return;
+  const d = document.createElement('div'); d.id = 'gfxFail';
+  d.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:99999;display:grid;place-items:center;padding:24px;background:#120c26;color:#fff;font:600 16px/1.45 system-ui,sans-serif;text-align:center';
+  d.innerHTML = '<div style="max-width:420px;display:grid;gap:14px;justify-items:center"><b style="font-size:22px">The 3D graphics couldn\'t start</b><span style="color:#cfc8e8">Your device is low on graphics memory. Close other game tabs or apps (and turn off Low Power Mode if it\'s on), then tap Reload.</span><button type="button" style="padding:12px 26px;border:0;border-radius:12px;background:#a77bff;color:#fff;font:800 16px system-ui,sans-serif">Reload</button></div>';
+  d.querySelector('button').addEventListener('click', () => location.reload());
+  (document.body || document.documentElement).appendChild(d);
+}
+/* graphics paused by the device (it can happen in the background or when memory is low): bring them back */
+{
+  const cv = renderer && renderer.domElement;
+  if (cv){
+    let lostT = 0;
+    cv.addEventListener('webglcontextlost', () => {
+      lostT = setTimeout(() => {
+        if (document.getElementById('gfxLost')) return;
+        const d = document.createElement('div'); d.id = 'gfxLost';
+        d.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:99998;display:grid;gap:10px;justify-items:center;padding:20px 24px;border-radius:16px;background:rgba(18,12,38,.94);color:#fff;font:600 15px system-ui,sans-serif;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.5)';
+        d.innerHTML = '<b style="font-size:18px">Graphics paused</b><span style="color:#cfc8e8">Your device paused the game\'s graphics.</span><button type="button" style="padding:10px 22px;border:0;border-radius:12px;background:#a77bff;color:#fff;font:800 15px system-ui,sans-serif">Reload</button>';
+        d.querySelector('button').addEventListener('click', () => location.reload());
+        document.body.appendChild(d);
+      }, 3000);
+    }, false);
+    cv.addEventListener('webglcontextrestored', () => { clearTimeout(lostT); const d = document.getElementById('gfxLost'); if (d) d.remove(); }, false);
+  }
 }
 /* ============ boot & frame loop ============ */
 newWorld(DEFAULT_SEED); syncSettings(); setTimeout(hideLoader, 300); $('ldBar').style.width = '100%'; resize(); selectSlot(0); $('itemName').style.opacity = 0;
