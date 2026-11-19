@@ -21,7 +21,7 @@ window.VOX_FIREBASE = {
   appId: "1:853017311954:web:9c76c81aa2362496698b0b"
 };
 
-/* login buttons in Settings. Add 'microsoft' or 'github' here after turning them on in Firebase (Authentication > Sign-in method) */
+/* login buttons in Settings: Google, and Apple once it is turned on in Firebase (Authentication > Sign-in method). Then make this ['google', 'apple'] */
 window.VOX_LOGINS = ['google'];
 
 </script>
@@ -106,11 +106,10 @@ window.VOX_LOGINS = ['google'];
     const first = u => String((u && u.displayName) || '').trim().split(/\s+/)[0].slice(0, 20);
     /* login options: Google always; the others turn on when they're switched on in Firebase and listed in VOX_LOGINS */
     const ON = Array.isArray(window.VOX_LOGINS) ? window.VOX_LOGINS : ['google'];
-    const PID = { google: 'google.com', microsoft: 'microsoft.com', github: 'github.com' };
+    const PID = { google: 'google.com', apple: 'apple.com' };
     const prov = (id, sel) => {
       let p;
-      if (id === 'github') p = new firebase.auth.GithubAuthProvider();
-      else if (id === 'microsoft'){ p = new firebase.auth.OAuthProvider('microsoft.com'); if (sel) p.setCustomParameters({ prompt: 'select_account' }); return p; }
+      if (id === 'apple'){ p = new firebase.auth.OAuthProvider('apple.com'); p.addScope('email'); p.addScope('name'); return p; }
       else { p = new firebase.auth.GoogleAuthProvider(); if (sel) p.setCustomParameters({ prompt: 'select_account' }); }
       return p;
     };
@@ -6991,6 +6990,17 @@ async function joinWorldById(wid){
 }
 function saveFriends(ids){ friends = ids; renderSide(); if (friendsRef) friendsRef.set({ ids }).catch(() => toast('Could not save your friends list')); }
 function renderSide(){ clearTimeout(sideTimer); sideTimer = setTimeout(renderSideNow, 60); }
+/* update a list in place: rows that did not change stay exactly as they are, so faces do not reload or flicker */
+function syncKids(box, fresh){
+  if (!box) return;
+  const a = [...box.children], b = [...fresh.children];
+  for (let i = 0; i < b.length; i++){
+    const o = a[i], n = b[i];
+    if (o && o.outerHTML === n.outerHTML){ if (n._live) o.replaceWith(n); continue; }
+    if (o) o.replaceWith(n); else box.appendChild(n);
+  }
+  for (let i = b.length; i < a.length; i++) a[i].remove();
+}
 async function renderSideNow(){
   const people = new Map();
   for (const p of lobbyPeers) if (p.kind === 'viewer' && p.by && p.by !== NET.myId && !people.has(p.by)) people.set(p.by, p.presence || {});
@@ -7010,7 +7020,7 @@ async function renderSideNow(){
     r.append(av, fi); for (const bt of buttons) r.appendChild(bt); return r;
   };
   const btn = (txt, cls, fn, label) => { const b = document.createElement('button'); b.className = 'fbtn ' + (cls || ''); b.textContent = txt; if (label) b.setAttribute('aria-label', label); b.addEventListener('click', fn); return b; };
-  const fl = $('flist'); fl.innerHTML = '';
+  const fl = document.createElement('div');
   let fOn = 0;
   const sorted = friends.slice().sort((a, b) => (people.has(b) - people.has(a)));
   for (const id of sorted){
@@ -7019,13 +7029,14 @@ async function renderSideNow(){
     if (on && pr && typeof pr.w === 'string' && lobbyIsPublic(pr.w)) bts.push(btn('Join', '', () => joinWorldById(pr.w)));
     if (NET.wid && NET.info && isWorldOwner() && NET.info.vis === 'private' && !arrIds(NET.info.allow).includes(id)) bts.push(btn('Let in', 'alt', () => { allowId(id); toast(nameOfId(id) + ' can join now'); renderSide(); }));
     if (!(on && pr && typeof pr.w === 'string') && on && party && NET.room) bts.push(btn('Invite', 'alt', () => { NET.room.presence({ inv: [id, party.code, Date.now()] }).then(() => toast('Invite sent')).catch(() => toast('Invite could not be sent')); }));
-    bts.push(btn('×', 'alt tiny', () => removeFriend(id), 'Remove ' + nameOfId(id)));
+    { const d = btn('×', 'alt tiny', () => removeFriend(id), 'Remove ' + nameOfId(id)); if (typeof TRASH_SVG !== 'undefined'){ d.className = 'fbtn fdel'; d.innerHTML = TRASH_SVG; d.title = 'Remove ' + nameOfId(id); } bts.push(d); }
     fl.appendChild(row(id, on, pr, bts));
   }
   if (!friends.length){ const n = document.createElement('p'); n.className = 'fnote'; n.textContent = NET.db ? 'No friends yet. Search a name above and send a friend request.' : 'Friends show up here when you play online.'; fl.appendChild(n); }
+  syncKids($('flist'), fl);
   $('fOnline').textContent = fOn; $('fTotal').textContent = friends.length;
   $('fBadge').textContent = fOn + reqIn.length; $('fBadge').hidden = !(fOn + reqIn.length); $('fBadge').classList.toggle('req', !!reqIn.length);
-  const ol = $('olist'); ol.innerHTML = ''; let oc = 0;
+  const ol = document.createElement('div'); let oc = 0;
   for (const [id, pr] of people){
     if (friends.includes(id)) continue; oc++;
     const bts = [];
@@ -7034,6 +7045,7 @@ async function renderSideNow(){
     ol.appendChild(row(id, true, pr, bts));
   }
   if (!oc){ const n = document.createElement('p'); n.className = 'fnote'; n.textContent = NET.room ? 'Nobody else is online right now.' : 'Online players show up when you play online.'; ol.appendChild(n); }
+  syncKids($('olist'), ol);
   $('oCount').textContent = oc;
   const playing = new Set(lobbyPeers.filter(p => p.kind === 'viewer' && p.by && p.presence && typeof p.presence.w === 'string' && p.presence.w).map(p => p.by));
   if (started && NET.wid) playing.add(NET.myId || 'me');
@@ -7108,10 +7120,10 @@ function onInvite(msg){
 
 /* friends inside the in-game menu: see where they are, join them, or let them into your private lobby */
 async function renderMenuFriends(){
-  const box = $('gFriends'); if (!box) return; box.innerHTML = '';
+  const real = $('gFriends'); if (!real) return; const box = document.createElement('div');
   const where = {}; for (const p of lobbyPeers) if (p.by && p.presence) where[p.by] = p.presence;
   const on = friends.filter(id => where[id]).length; $('gFrOn').textContent = on + ' online';
-  if (!friends.length){ const n = document.createElement('p'); n.className = 'fnote'; n.textContent = NET.db ? 'No friends yet. Type a name below to send a friend request.' : 'Friends work when you play online.'; box.appendChild(n); return; }
+  if (!friends.length){ const n = document.createElement('p'); n.className = 'fnote'; n.textContent = NET.db ? 'No friends yet. Type a name below to send a friend request.' : 'Friends work when you play online.'; box.appendChild(n); syncKids(real, box); return; }
   const ps = NET.user ? await NET.user.profiles(friends) : {};
   await Promise.all(friends.filter(f => !nickCache.has(f)).map(fetchNick));
   const sorted = friends.slice().sort((a, b) => (!!where[b] - !!where[a]) || ((where[b] && where[b].w === NET.wid) - (where[a] && where[a].w === NET.wid)));
@@ -7128,6 +7140,7 @@ async function renderMenuFriends(){
     if (NET.info && isWorldOwner() && NET.info.vis === 'private' && !arrIds(NET.info.allow).includes(id)){ const l = document.createElement('button'); l.className = 'fbtn alt'; l.textContent = 'Let in'; l.addEventListener('click', () => { allowId(id); toast('They can join now'); renderMenuFriends(); }); r.appendChild(l); }
     box.appendChild(r);
   }
+  syncKids(real, box);
 }
 $('gFrAdd').addEventListener('submit', async e => {
   e.preventDefault(); const q = $('gFrIn').value.trim().toLowerCase(); if (!q) return;
@@ -7152,8 +7165,10 @@ function setFace(img, id, pr, ps){
   if (pr && typeof pr.k === 'string'){ img.src = headIcon(lookFrom(pr.k)); return; }
   if (lookCache.has(id)){ const c = lookCache.get(id); if (c){ img.src = headIcon(lookFrom(c)); return; } }
   else if (NET.db){ lookCache.set(id, null); NET.db.doc('looks/' + id).get().then(s => { const v = s.exists ? s.data() : null; if (v && typeof v.code === 'string'){ lookCache.set(id, v.code); renderSide(); if (!started) renderWorldList(); } }).catch(() => {}); }
-  if (ps && ps[id]) img.src = ps[id].avatarUrl;
+  if (ps && ps[id] && ps[id].avatarUrl) img.src = ps[id].avatarUrl;
+  else if (!img.getAttribute('src')) img.src = headIcon(DEFAULT_LOOK_FACE());   /* no picture yet: a plain face, never a broken image */
 }
+function DEFAULT_LOOK_FACE(){ try { return lookFrom(''); } catch (e){ return myLook; } }
 function lobbyPresence(){ if (NET.room) NET.room.presence({ w: NET.wid || null, k: lookCode(myLook), n: myName().slice(0, 16) }).catch(() => {}); }
 function publishLook(){
   $('meAvatar').src = headIcon(myLook); lobbyPresence(); partyLookPresence(); lastPres = ''; renderSide();
@@ -9510,6 +9525,8 @@ $('admCreate').addEventListener('click', async () => {
 cmd('admin', { desc: 'Open the admin panel (game owner only)', run(){ openAdmin(); } });
 /* ============ bell: recent updates to the game ============ */
 const NEWS = [
+  { id: 49, date: 'Nov 18', title: 'Simpler turn screen and Apple login', items: ['On phones and iPads, the turn screen just says Turn your screen.', 'Log in with Microsoft and GitHub are gone. Log in with Apple is on its way.'] },
+  { id: 48, date: 'Nov 18', title: 'Smoother friends list', items: ['The friends list no longer blinks every few seconds. Only a friend whose status changed updates.', 'Friends without a face picture show a plain face instead of a broken picture.', 'The old level system is gone: no more Level up messages, and quests no longer show XP.'] },
   { id: 47, date: 'Nov 18', title: 'Wear your armor', items: ['Armor has 4 slots: Helmet, Chestplate, Leggings and Boots. Tap armor in your bag or use it from your hotbar to put it on, and it leaves your inventory. Tap a worn piece to take it off and it comes back.', 'Creative has the armor slots too: use armor from your hotbar to wear it, tap it in the slots to put it back in your hotbar.', 'Your armor shows on your character, shaped to fit, and everyone can see it. Leather, Copper, Iron, Gold, Diamond, Voxite and Fur each have their own look.', 'Swords, tools and items are thick 3D pixel models now, not flat pictures, and look bigger in third person. Other players see what you are holding too.', 'After the AI helper writes code, it gives you 3 ideas to add next. Tap Add it and the AI codes it, or Copy to change it first.'] },
   { id: 46, date: 'Nov 18', title: 'One create page for everything', items: ['Create Lobby on the home menu opens the same create page as the game pages. Pick Survival, Parkour or Bedwars at the top and the whole page changes to fit.', 'The game pages are cleaner: make a lobby with the Create card in Worlds.', 'The ideas box only shows up once you start typing.'] },
   { id: 45, date: 'Nov 18', title: 'Play styles, flat Survival and smart ideas', items: ['Survival lobbies have 4 play styles: Survival, Peaceful (no monsters, health comes back fast), Survival Adventure (monsters, but no breaking or placing blocks) and Peaceful Adventure (no monsters, just explore).', 'Owners can change it any time with /style.', 'Survival lobbies can be Flat now: just flat grass, nothing else.', 'Name ideas use your own name, like Bob\'s Kingdom or bob.pvp.', 'When you make a lobby, ideas follow what you type. Type pvp and it suggests PvP tags and PvP names.', 'The tag box suggests tags while you type. Tapping options no longer jumps you to the top.', 'Every block and item is always in the Creative menu, even brand-new ones.'] },
@@ -9928,7 +9945,7 @@ function current(m){
 const thing = n => { try { const t = findThing(n); return t ? { k: t.k, v: t.v } : null; } catch (e){ return null; } };
 const iconOf = n => { if (n === 'XP') return XP_ICON; const t = thing(n); try { return t ? thingIcon(t) : ''; } catch (e){ return ''; } };
 function giveAll(rw){
-  for (const [n, c] of rw){ if (n === 'XP'){ try { addXP(c, 'quest'); } catch (e){} continue; } const t = thing(n); if (!t) continue; const left = addItem(t, c); if (left > 0) spawnThing(t, pos.x, pos.y + 1, pos.z, 1.5, null, left); }
+  for (const [n, c] of rw){ if (n === 'XP') continue;   /* levels and XP were taken out */ const t = thing(n); if (!t) continue; const left = addItem(t, c); if (left > 0) spawnThing(t, pos.x, pos.y + 1, pos.z, 1.5, null, left); }
 }
 const chip = ([n, c], i) => '<span class="qchip" style="animation-delay:' + (i * 90 + 700) + 'ms"><img alt="" src="' + iconOf(n) + '">+' + c + ' ' + esc(n) + '</span>';
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -9980,7 +9997,7 @@ function celebrate(def, kind){
   const bar = T.querySelector('.qpb'); if (bar){ bar.classList.add('full'); bar.querySelectorAll('i').forEach(el => el.classList.add('on')); const f = bar.querySelector('.fill'); if (f) f.style.width = '100%'; }
   setTimeout(() => {
     T.classList.add('done');
-    T.innerHTML = '<span class="qico pop">' + CHECK_SVG + '</span><span class="qmain"><span class="qtop"><span class="qkind' + (kind === 'daily' ? ' daily' : '') + '">COMPLETE</span><span class="qname"></span></span><span class="qrw">' + def.rw.map(chip).join('') + '</span></span>';
+    T.innerHTML = '<span class="qico pop">' + CHECK_SVG + '</span><span class="qmain"><span class="qtop"><span class="qkind' + (kind === 'daily' ? ' daily' : '') + '">COMPLETE</span><span class="qname"></span></span><span class="qrw">' + def.rw.filter(([n]) => n !== 'XP').map(chip).join('') + '</span></span>';
     T.querySelector('.qname').textContent = def.t;
     const ico = T.querySelector('.qico'), C = ['#3fd57a', '#ffd86b', '#8fe3ff', '#ffffff', '#ff9ad5'];
     setTimeout(() => { for (let i = 0; i < 14; i++){ const s = document.createElement('i'); s.className = 'qspark'; const a = Math.random() * 6.28, d = 22 + Math.random() * 22; s.style.setProperty('--x', Math.cos(a) * d + 'px'); s.style.setProperty('--y', Math.sin(a) * d + 'px'); s.style.background = C[i % C.length]; ico.appendChild(s); setTimeout(() => s.remove(), 750); } }, 550);
@@ -10054,7 +10071,7 @@ function row(def, p, state){
   const pct = Math.min(100, p / def.need * 100), daily = !!def.dly;
   return '<div class="qrow ' + state + '"><span class="qico"><img alt="" src="' + iconOf(def.icon) + '">' + (state === 'ok' ? '<span class="qokb">' + TICK + '</span>' : '') + '</span><span class="qmain"><span class="qname">' + esc(def.t) + '</span><span class="qdesc">' + esc(def.d) + '</span>'
     + (state === 'lock' ? '' : '<span class="qbarrow"><span class="qbar' + (daily ? ' daily' : '') + (state === 'ok' ? ' full' : '') + '"><i style="width:' + (state === 'ok' ? 100 : pct) + '%"></i></span><span class="qnum">' + (state === 'ok' ? def.need : Math.min(p, def.need)) + ' / ' + def.need + '</span></span>')
-    + '<span class="qrw">' + def.rw.map(([n, c]) => '<span class="qchip"><img alt="" src="' + iconOf(n) + '">+' + c + ' ' + esc(n) + '</span>').join('') + '</span></span></div>';
+    + '<span class="qrw">' + def.rw.filter(([n]) => n !== 'XP').map(([n, c]) => '<span class="qchip"><img alt="" src="' + iconOf(n) + '">+' + c + ' ' + esc(n) + '</span>').join('') + '</span></span></div>';
 }
 function renderPanel(){
   const q0 = load(), md = mode(), q = slot(md), STARTER = QSETS[md].st;
@@ -16989,8 +17006,8 @@ function deviceLandscape(){
     const what = DEV.tablet ? (DEV.ios ? 'iPad' : 'tablet') : 'phone';
     g.innerHTML = '<div class="rgc"><span class="rgph"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 3L3 8m18 8l-5 5M3.884 12.116l8.232-8.232a3.02 3.02 0 0 1 4.268 0l3.732 3.732a3.02 3.02 0 0 1 0 4.268l-8.232 8.232a3.02 3.02 0 0 1-4.268 0l-3.732-3.732a3.02 3.02 0 0 1 0-4.268M7.25 15.75l1 1"/></svg>'
       + '<span class="rgok" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></span>'
-      + '<h2>Turn your screen sideways</h2><p></p><span class="rgdots" aria-hidden="true"><i></i><i></i><i></i></span><small class="rghint" hidden>Screen not turning? Check that rotation lock is off.</small></div>';
-    const msg = 'Turn your ' + what + ' sideways and the game opens right away.';
+      + '<h2>Turn your screen</h2><p hidden></p></div>';   /* just the words, nothing else */
+    const msg = '';
     /* iPads and tablets get a tablet icon (your iPad picture); phones keep the phone icon. The tablet is drawn
        turned the same way as the phone picture, so it stands tall and swings sideways exactly like it */
     if (DEV.tablet){ const old = g.querySelector('.rgph>svg'); const t = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); t.setAttribute('viewBox', '0 0 24 24'); t.setAttribute('aria-hidden', 'true');
@@ -16998,7 +17015,7 @@ function deviceLandscape(){
       old.replaceWith(t); }
     const H2 = g.querySelector('h2'), P = g.querySelector('p'), ph = g.querySelector('.rgph>svg');
     P.textContent = msg;
-    g.setAttribute('aria-label', 'Turn your screen sideways');
+    g.setAttribute('aria-label', 'Turn your screen');
     document.body.appendChild(g);
 
     /* ---- following your turn: how far the device is turned like a steering wheel, in degrees (+ = to the right) ----
@@ -17040,7 +17057,7 @@ function deviceLandscape(){
     /* iPhones and iPads only send motion after you allow it, and only from a tap */
     const needAsk = (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') || (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function');
     let noTilt = false; try { noTilt = sessionStorage.getItem('vx-notilt') === '1'; } catch (e){}
-    if (needAsk && !noTilt){
+    if (false && needAsk && !noTilt){   /* no extra buttons: the screen just says Turn your screen */
       const tap = document.createElement('button'); tap.type = 'button'; tap.className = 'rgtap'; tap.textContent = 'Tap so the phone follows your turn';
       g.querySelector('.rgdots').after(tap);
       let asked = false;
@@ -17060,7 +17077,7 @@ function deviceLandscape(){
     }
 
     const resetIcon = () => { ph.style.transition = ''; ph.style.transform = live ? 'rotate(' + (-45 + shown).toFixed(2) + 'deg)' : ''; };
-    const asking = () => { H2.textContent = 'Turn your screen sideways'; P.textContent = msg; };
+    const asking = () => { H2.textContent = 'Turn your screen'; P.textContent = ''; };
     const check = () => {
       const show = !rightWayIn();
       const wrong = false;
@@ -17086,7 +17103,7 @@ function deviceLandscape(){
       g.hidden = false;
       document.body.classList.add('rotgate');
       resetIcon(); if (live && !raf) raf = requestAnimationFrame(frame);
-      const h = g.querySelector('.rghint'); h.hidden = true; clearTimeout(check.t); check.t = setTimeout(() => { h.hidden = false; }, 4000);
+      const h = g.querySelector('.rghint'); if (h){ h.hidden = true; clearTimeout(check.t); check.t = setTimeout(() => { h.hidden = false; }, 4000); }
       try { for (const k in keys) keys[k] = false; mineHeld = false; } catch (e){}
     };
     for (const e of ['touchstart', 'touchmove', 'pointerdown', 'wheel']) g.addEventListener(e, ev => { if (!(ev.target.closest && ev.target.closest('.rgtap'))) ev.preventDefault(); }, { passive: false });
@@ -17221,6 +17238,7 @@ function hudMsg(icon, color, text, sub, ms){
 }
 function sfx(f1, f2, len, vol, type){ try { if (OPTS.sound === false) return; const S = window.__vxSfx; if (S && S._tone) S._tone(f1, f2, len, vol, type || 'triangle'); } catch (e){} }
 function addXP(n, why){
+  return;   /* the old level system is switched off */
   if (!n) return;
   STATS.xp += n;
   let up = false;
@@ -17464,8 +17482,6 @@ function scriptRichChat(text, opts){
         const w = weaponOf(args[2]);
         if (started) killFeedAdd(clean(args[0]), clean(args[1]), w);
         args = [args[0], args[1], w.name];   /* scripts get the weapon's name, like 'Iron Sword' or 'Fist' */
-      } else if (name === 'levelup' && Array.isArray(args)){
-        scriptRichChat('{gold}{b}Level up!{/} {white}You reached level {yellow}{b}' + (+args[0] || 0), { style: 'banner', icon: 'star', color: '#ffb648' });
       }
     } catch (e){}
     return _se.call(this, name, args);
@@ -18153,7 +18169,7 @@ html .side .stop.hasgear .slogo{font-size:clamp(17px,calc((var(--sidew, 300px) -
       const out = [];
       const online = new Map(); for (const p of lobbyPeers) if (p.kind === 'viewer' && p.by && p.by !== NET.myId) online.set(p.by, p.presence || {});
       const recent = load().filter(x => !friends.includes(x.id)).slice(0, 3);
-      if (!recent.length){ const n = document.createElement('p'); n.className = 'fnote'; n.textContent = 'People you play with show up here. Or search a name above.'; list.replaceChildren(n); return r; }
+      if (!recent.length){ const n = document.createElement('p'); n.className = 'fnote'; n.textContent = 'People you play with show up here. Or search a name above.'; { const f = document.createElement('div'); f.appendChild(n); syncKids(list, f); } return r; }
       const ids = recent.map(x => x.id);
       await Promise.all(ids.filter(id => !nickCache.has(id)).map(id => fetchNick(id).catch(() => {})));
       const ps = NET.user ? await NET.user.profiles(ids) : {};
@@ -18169,7 +18185,7 @@ html .side .stop.hasgear .slogo{font-size:clamp(17px,calc((var(--sidew, 300px) -
         if (NET.db){ const a = document.createElement('button'); a.className = 'fbtn alt'; const req = reqOut.includes(id); a.textContent = req ? 'Requested' : '+ Add'; a.addEventListener('click', () => req ? cancelRequest(id) : sendRequest(id)); row.appendChild(a); }
         out.push(row);
       }
-      list.replaceChildren(...out);   /* swap in all at once: no blank flash while names load */
+      { const f = document.createElement('div'); f.append(...out); syncKids(list, f); }   /* only rows that changed are swapped: no blinking */
     } catch (e){}
     return r;
   };
@@ -18261,8 +18277,7 @@ body:not(.playing) #settings .vtab[data-t=world]{display:none}
 #settings .lbtn{position:relative;height:48px;border:0;border-radius:12px;display:flex;align-items:center;justify-content:center;gap:10px;font:700 14.5px var(--display);cursor:pointer;-webkit-tap-highlight-color:transparent;transition:transform .1s,box-shadow .1s}
 #settings .lbtn svg{width:21px;height:21px;flex:none}
 #settings .lbtn.google{background:#fff;color:#1f1f1f;box-shadow:0 4px 0 #c9c9d6}
-#settings .lbtn.microsoft{background:#2f2f2f;color:#fff;box-shadow:0 4px 0 #111}
-#settings .lbtn.github{background:#24292f;color:#fff;box-shadow:0 4px 0 #0d1014}
+#settings .lbtn.apple{background:#000;color:#fff;box-shadow:0 4px 0 #3a3a3a}
 #settings .lbtn:active:not(:disabled){transform:translateY(3px);box-shadow:0 1px 0 rgba(0,0,0,.4)}
 #settings .lbtn:disabled{opacity:.45;cursor:default}
 #settings .lbtn .soon{position:absolute;top:-7px;right:8px;padding:2px 7px;border-radius:6px;background:#a77bff;color:#fff;font:800 10px var(--body);letter-spacing:.05em}
@@ -18550,7 +18565,7 @@ body:not(.playing) #settings .vtab[data-t=world]{display:none}
     const before = boxes.map(b => ({ b, s: sig(b), nodes: [...b.childNodes] }));
     const r = await _rs.apply(this, arguments);
     await Promise.resolve();
-    for (const x of before) try { if (x.nodes.length && sig(x.b) === x.s) x.b.replaceChildren(...x.nodes); } catch (e){}
+    for (const x of before) try { if (x.nodes.length && sig(x.b) === x.s && (x.nodes.length !== x.b.childNodes.length || x.nodes.some((n, i) => x.b.childNodes[i] !== n))) x.b.replaceChildren(...x.nodes); } catch (e){}
     return r;
   };
 }
@@ -22256,10 +22271,10 @@ function acctInit(){
     Promise.resolve(pr).then(ok => { if (ok) showLoad('Logging you in…', 'Loading your worlds, friends and ranks'); else hideLoad(); })
       .catch(e => { hideLoad(); toast((e && e.message) || 'Couldn\'t log in. Try again.'); });
   };
-  const MS = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9.5" height="9.5" fill="#f25022"/><rect x="12.5" y="2" width="9.5" height="9.5" fill="#7fba00"/><rect x="2" y="12.5" width="9.5" height="9.5" fill="#00a4ef"/><rect x="12.5" y="12.5" width="9.5" height="9.5" fill="#ffb900"/></svg>';
-  const GH = '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M12 .5a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.9 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5z"/></svg>';
-  const LOGINS = [['google', 'Google', G], ['microsoft', 'Microsoft', MS], ['github', 'GitHub', GH]];
-  const NAME = { google: 'Google', microsoft: 'Microsoft', github: 'GitHub' };
+  /* Apple's logo, as Apple asks for on its sign-in button */
+  const AP = '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M16.37 12.6c-.02-2.33 1.9-3.45 1.99-3.5-1.08-1.59-2.77-1.8-3.37-1.83-1.43-.15-2.8.84-3.53.84-.73 0-1.85-.82-3.04-.8-1.56.02-3 .91-3.81 2.31-1.62 2.82-.41 6.99 1.17 9.28.77 1.12 1.69 2.38 2.9 2.33 1.16-.05 1.6-.75 3.01-.75 1.4 0 1.8.75 3.03.73 1.25-.02 2.04-1.14 2.81-2.27.88-1.3 1.25-2.56 1.27-2.62-.03-.01-2.43-.93-2.43-3.72zM14.05 5.75c.64-.78 1.08-1.86.96-2.94-.93.04-2.05.62-2.71 1.4-.6.69-1.12 1.79-.98 2.85 1.03.08 2.09-.53 2.73-1.31z"/></svg>';
+  const LOGINS = [['google', 'Google', G], ['apple', 'Apple', AP]];
+  const NAME = { google: 'Google', apple: 'Apple' };
   const on = id => (A.logins || ['google']).includes(id);
   const btns = mode => {
     const w = document.createElement('div'); w.className = 'lbtns';
