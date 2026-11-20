@@ -35,7 +35,7 @@ window.VOX_LOGINS = ['google'];
   /* guests (not logged in): everything the game remembers in this browser (name, look, parkour, gifts...) lives in this tab only.
      A refresh keeps it; closing the tab clears it. Device settings (graphics, sound...) still stick around. */
   const ACCT = 'vx-acct';
-  const KEEP = new Set(['vx-settings', 'vx-side', 'vx-settab', 'vx-news', 'vx-prefs', 'vx-stats-ui', 'vx-aiopts', 'vx-aikey', ACCT]);
+  const KEEP = new Set(['vx-banmark', 'vx-settings', 'vx-side', 'vx-settab', 'vx-news', 'vx-prefs', 'vx-stats-ui', 'vx-aiopts', 'vx-aikey', ACCT]);
   let GUEST_TAB = false;
   try { GUEST_TAB = localStorage.getItem(ACCT) !== '1'; } catch (e){}
   if (GUEST_TAB) try {
@@ -87,11 +87,13 @@ window.VOX_LOGINS = ['google'];
     } catch (e){}
     firebase.initializeApp(CFG);
     const auth = firebase.auth();
-    /* signed in once = stays signed in on this device until you sign out */
-    try { await auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL); } catch (e){}
+    /* accounts stay signed in on this device until you sign out. Guests only last while their tab is open:
+       a refresh keeps the same guest, closing the tab ends it (the next visit is a brand new guest) */
+    const P = firebase.auth.Auth.Persistence;
     let loginErr = null;
     try { await auth.getRedirectResult(); } catch (e){ loginErr = e; }
     let user = await new Promise(r => { const off = auth.onAuthStateChanged(u => { off(); r(u); }); });
+    try { await auth.setPersistence(user && !user.isAnonymous ? P.LOCAL : P.SESSION); } catch (e){}
     /* not logged in: join as a guest so you can still play online with people. Guests' progress isn't saved.
        (needs Firebase > Authentication > Sign-in method > Anonymous turned on; if it's off you just play offline) */
     /* not logged in: play as a guest. One guest id per browser (shared by its tabs, so opening a new tab never
@@ -125,6 +127,7 @@ window.VOX_LOGINS = ['google'];
     };
     const signIn = async (id, pick) => {
       id = PID[id] ? id : 'google';
+      try { await auth.setPersistence(P.LOCAL); } catch (e){}   /* a real account stays signed in */
       try { await auth.signInWithPopup(prov(id, pick)); try { localStorage.setItem(ACCT, '1'); } catch (e){} location.reload(); return true; }
       catch (e){
         if (e && (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment' || e.code === 'auth/web-storage-unsupported')){ await auth.signInWithRedirect(prov(id, pick)); return true; }
@@ -6887,11 +6890,33 @@ let lookDir = null, lookDirAt = 0, fsTimer = 0;
 async function loadLookDir(){
   if (!NET.db) return [];
   if (lookDir && Date.now() - lookDirAt < 30000) return lookDir;
-  try { const s = await NET.db.collection('looks').limit(500).get(); lookDir = s.docs.map(d => { const v = d.data() || {}; return { id: d.id, nick: cleanNick(v.nick || '') || '', code: typeof v.code === 'string' ? v.code : null, t: +v.t || 0 }; }); lookDirAt = Date.now(); }
-  catch (e){ lookDir = lookDir || []; }
-  for (const p of lookDir){ if (p.nick && !nickCache.get(p.id)) nickCache.set(p.id, p.nick); if (p.code) lookCache.set(p.id, p.code); }
+  try { const s = await NET.db.collection('looks').limit(500).get(); lookDirAll = s.docs.map(d => { const v = d.data() || {}; const o = { id: d.id, nick: cleanNick(v.nick || '') || '', code: typeof v.code === 'string' ? v.code : null, t: +v.t || 0, g: v.g === 1 ? 1 : 0, a: v.a === 1 ? 1 : 0 }; LOOKMETA.set(d.id, { g: o.g, t: o.t, at: Date.now() }); return o; }); lookDirAt = Date.now(); }
+  catch (e){ lookDirAll = lookDirAll || []; }
+  for (const p of lookDirAll){ if (p.nick && !nickCache.get(p.id)) nickCache.set(p.id, p.nick); if (p.code) lookCache.set(p.id, p.code); }
+  lookDir = lookDirAll.filter(lookKeep);
   return lookDir;
 }
+/* guests (not signed in) only last while their tab is open. Once a guest's tab has been closed for a while
+   their name stops showing up anywhere, unless they're banned, muted or have a rank (so you can still see that) */
+const isGuest = () => !!(window.__vxAuth && window.__vxAuth.guest);
+const LOOK_STALE = 10 * 60000, LOOKMETA = new Map();
+let lookDirAll = null;
+function guestGone(id, m){
+  m = m || LOOKMETA.get(id); if (!m) return false;
+  if (m.none) return true;   /* their name card was cleared */
+  return m.g === 1 && Date.now() - (m.t || 0) > LOOK_STALE;
+}
+function lookProtected(id){
+  try { if (typeof MOD !== 'undefined' && MOD && (activeUntil(MOD.bans[id]) || activeUntil(MOD.mutes[id]) || (MOD.powers || []).includes(id))) return true; } catch (e){}
+  try { if (typeof rolesOf === 'function' && rolesOf(id).length) return true; } catch (e){}
+  try { if (typeof trOnline === 'function' && trOnline().has(id)) return true; } catch (e){}
+  return false;
+}
+async function lookMetaFor(ids){
+  if (!NET.db) return;
+  await Promise.all(ids.filter(id => { const m = LOOKMETA.get(id); return !m || Date.now() - m.at > 60000; }).map(id => NET.db.doc('looks/' + id).get().then(s => { const v = s.exists ? s.data() || {} : null; LOOKMETA.set(id, v ? { g: v.g === 1 ? 1 : 0, t: +v.t || 0, at: Date.now() } : { none: true, at: Date.now() }); }).catch(() => {})));
+}
+function lookKeep(p){ return !!p && (p.id === NET.myId || !p.g || Date.now() - p.t < LOOK_STALE || lookProtected(p.id)); }
 let fsLast = { q: '', hits: [], online: new Set() }, fsRun = 0;
 async function runFriendSearch(quick){
   const q = $('fsIn').value.trim().toLowerCase(), box = $('fsRes'), run = ++fsRun;
@@ -7211,7 +7236,7 @@ function DEFAULT_LOOK_FACE(){ try { return lookFrom(''); } catch (e){ return myL
 function lobbyPresence(){ if (NET.room) NET.room.presence({ w: NET.wid || null, k: lookCode(myLook), n: myName().slice(0, 16) }).catch(() => {}); }
 function publishLook(){
   $('meAvatar').src = headIcon(myLook); lobbyPresence(); partyLookPresence(); lastPres = ''; renderSide();
-  if (NET.db && NET.myId) NET.db.doc('looks/' + NET.myId).set({ code: lookCode(myLook), nick: myName() === 'You' ? '' : myName().slice(0, 16), nl: myName() === 'You' ? '' : myName().slice(0, 16).toLowerCase(), t: Date.now() }).catch(() => {});
+  if (NET.db && NET.myId) NET.db.doc('looks/' + NET.myId).set({ code: lookCode(myLook), nick: myName() === 'You' ? '' : myName().slice(0, 16), nl: myName() === 'You' ? '' : myName().slice(0, 16).toLowerCase(), t: Date.now(), g: isGuest() ? 1 : 0, a: isGuest() ? 0 : 1 }).catch(() => {});
 }
 function partyLookPresence(){ if (party) party.r.presence({ w: NET.wid || null, lead: !!party.lead, k: lookCode(myLook), n: myName().slice(0, 16) }).catch(() => {}); }
 $('meAvatar').src = headIcon(myLook);
@@ -9564,6 +9589,7 @@ $('admCreate').addEventListener('click', async () => {
 cmd('admin', { desc: 'Open the admin panel (game owner only)', run(){ openAdmin(); } });
 /* ============ bell: recent updates to the game ============ */
 const NEWS = [
+  { id: 63, date: 'Nov 20', title: 'Guests and a tidier friends panel', items: ['Playing without signing in: refreshing keeps your guest, closing the tab ends it. Next time you are a new guest. Sign in to keep your name and progress.', 'Guests who closed their tab no longer show up in player lists or Recently Played.', 'The friends panel in a game has even spacing now, and the friends and online box at the top is lined up.'] },
   { id: 62, date: 'Nov 20', title: 'Fixes: walking and jumping', items: ['Other players\' arms and legs move again when they walk and run (they looked stiff before).', 'Building up (jump and place a block under you) or hopping up steps no longer gets you flagged for jumping too high.'] },
   { id: 61, date: 'Nov 20', title: 'Profiles and weekly events', items: ['Tap your picture on the home screen (or Menu > Profile) to see your profile: awards, parkour stars, Bedwars rank and wins, treasures and your favourite mode.', 'Tap a friend\'s picture in your friends list to see their profile.', 'A new weekly event every Monday: Treasure Week, Bridge Egg Madness, Boss Week, Pet Week and Speed Week. Look for the banner on the home screen.'] },
   { id: 60, date: 'Nov 20', title: 'Survival: pets, bosses, farming, weather, trading', items: ['Tame wolves (with meat or a bone) and cats (with fish). They fight monsters with you. Tap them to make them sit.', 'Bosses live in fortresses: the Yeti King, the Pharaoh and the Dark Knight. Fight them with friends for big loot.', 'Farming: plant Wheat Seeds and Sweet Berries on grass or dirt and come back when they have grown. New foods to cook too.', 'Weather: rain, snow and thunderstorms. Monsters come out in storms!', 'Trade with friends: Menu > Trade or type /trade when you stand near them.'] },
@@ -13152,7 +13178,7 @@ setInterval(() => {
 { const _gs = goSpawn; goSpawn = function(){ if (typeof PK !== 'undefined' && PK.on && inParkour()){ pkRespawn(false); toast(PK.cp ? 'Back to checkpoint ' + PK.cp : 'Back to the start of level ' + (PK.level + 1)); return; } return _gs.apply(this, arguments); }; }
 /* ============ moderation: powers for picked people, bans, mutes, kicks, warnings and announcements.
    Everything lives in one owner-only record (ranks/mod) that every player reads. ============ */
-let modRef = null, modSaving = Promise.resolve();
+let modRef = null, modSaving = Promise.resolve(), MOD_READY = false;
 const DAY = 86400000;
 function fmtLeft(ms){
   if (ms == null) return 'forever';
@@ -13171,7 +13197,7 @@ function saveMod(change){
 function connectMod(){
   if (!NET.db || modRef) return;
   modRef = NET.db.doc('ranks/mod');
-  modRef.onSnapshot(s => { const v = s.exists ? s.data() || {} : {}; MOD = { powers: Array.isArray(v.powers) ? v.powers : [], bans: v.bans || {}, mutes: v.mutes || {}, kicks: v.kicks || {}, warns: v.warns || {}, announce: v.announce || null, pardons: v.pardons || {}, acOff: !!v.acOff }; modApply(); try { if (!$('adminPanel').hidden) renderMod(); } catch (e){} }, () => {});
+  modRef.onSnapshot(s => { const v = s.exists ? s.data() || {} : {}; MOD_READY = true; MOD = { powers: Array.isArray(v.powers) ? v.powers : [], bans: v.bans || {}, mutes: v.mutes || {}, kicks: v.kicks || {}, warns: v.warns || {}, announce: v.announce || null, pardons: v.pardons || {}, acOff: !!v.acOff }; modApply(); try { if (!$('adminPanel').hidden) renderMod(); } catch (e){} }, () => {});
 }
 { let tries = 0; setTimeout(function wait(){ if (NET.db) connectMod(); else if (++tries < 25) setTimeout(wait, 800); }, 1400); }
 
@@ -13368,7 +13394,7 @@ function renderModActions(){
   wrap.appendChild(mu);
   /* kick and warn */
   const kk = modBox('kick', 'Kick from their lobby'); const kr = document.createElement('div'); kr.className = 'modrow'; const kreason = modInput('Reason', 80);
-  kr.append(kreason, modBtn('Kick', '', () => saveMod(m => { m.kicks[p.id] = { at: Date.now(), reason: kreason.value.trim().slice(0, 80) }; }).then(ok => ok && toast('Kicked ' + p.nick))));
+  kr.append(kreason, modBtn('Kick', '', () => saveMod(m => { m.kicks[p.id] = { at: Date.now(), reason: kreason.value.trim().slice(0, 80), nick: p.nick }; }).then(ok => ok && toast('Kicked ' + p.nick))));
   kk.appendChild(kr); wrap.appendChild(kk);
   const wn = modBox('warn', 'Send a warning'); const wr = document.createElement('div'); wr.className = 'modrow'; const wtxt = modInput('What should they stop doing?', 160);
   wr.append(wtxt, modBtn('Warn', '', () => { const t = wtxt.value.trim(); if (!t){ wtxt.focus(); return; } saveMod(m => { m.warns[p.id] = { at: Date.now(), text: t.slice(0, 160) }; }).then(ok => ok && toast('Warned ' + p.nick)); }));
@@ -13409,7 +13435,7 @@ cmd('ban', { usage: '<name> <days|forever> [reason]', desc: 'Ban a player (staff
 cmd('unban', { usage: '<name>', desc: 'Unban a player (staff)', run(a){ ownerOnly('mod'); return modFindPlayer(a[0]).then(p => saveMod(m => { delete m.bans[p.id]; }).then(ok => ok && sys('Unbanned ' + p.nick + '.', 'ok'))); } });
 cmd('mute', { usage: '<name> <minutes|forever> [reason]', desc: 'Stop a player from chatting (staff)', run(a){ ownerOnly('mod'); return modFindPlayer(a[0]).then(p => { const ms = parseDur(a[1], 60000); if (ms === null) throw new Error('say how many minutes, or forever'); return saveMod(m => { m.mutes[p.id] = { until: ms ? Date.now() + ms : 0, reason: a.slice(2).join(' ').slice(0, 80), at: Date.now(), nick: p.nick }; }).then(ok => ok && sys('Muted ' + p.nick + ' ' + (ms ? 'for ' + fmtLeft(ms) : 'forever') + '.', 'ok')); }); } });
 cmd('unmute', { usage: '<name>', desc: 'Let a player chat again (staff)', run(a){ ownerOnly('mod'); return modFindPlayer(a[0]).then(p => saveMod(m => { delete m.mutes[p.id]; }).then(ok => ok && sys('Unmuted ' + p.nick + '.', 'ok'))); } });
-cmd('kick', { usage: '<name> [reason]', desc: 'Send a player out of their lobby (staff)', run(a){ ownerOnly('mod'); return modFindPlayer(a[0]).then(p => saveMod(m => { m.kicks[p.id] = { at: Date.now(), reason: a.slice(1).join(' ').slice(0, 80) }; }).then(ok => ok && sys('Kicked ' + p.nick + '.', 'ok'))); } });
+cmd('kick', { usage: '<name> [reason]', desc: 'Send a player out of their lobby (staff)', run(a){ ownerOnly('mod'); return modFindPlayer(a[0]).then(p => saveMod(m => { m.kicks[p.id] = { at: Date.now(), reason: a.slice(1).join(' ').slice(0, 80), nick: p.nick }; }).then(ok => ok && sys('Kicked ' + p.nick + '.', 'ok'))); } });
 cmd('warn', { usage: '<name> <message>', desc: 'Send a player a warning (staff)', run(a){ ownerOnly('mod'); const t = a.slice(1).join(' ').trim(); if (!t) throw new Error('type the warning after the name'); return modFindPlayer(a[0]).then(p => saveMod(m => { m.warns[p.id] = { at: Date.now(), text: t.slice(0, 160) }; }).then(ok => ok && sys('Warned ' + p.nick + '.', 'ok'))); } });
 cmd('announce broadcast', { usage: '<message>', desc: 'Show a message to everyone online (admins and the owner)', run(a, raw){ ownerOnly('admin'); const t = String(raw || '').trim().slice(0, 100); if (!t) throw new Error('type the message'); return saveMod(m => { m.announce = { text: t, at: Date.now() }; }).then(ok => ok && sys('Sent to everyone online.', 'ok')); } });
 cmd('givepowers', { usage: '<name>', desc: 'Give a player your powers (game owner only)', run(a){ ownerOnly(); return modFindPlayer(a[0]).then(p => saveMod(m => { m.powers = [...new Set([...m.powers, p.id])]; }).then(ok => ok && sys('Gave powers to ' + p.nick + '.', 'ok'))); } });
@@ -18230,7 +18256,9 @@ html .side .stop.hasgear .slogo{font-size:clamp(17px,calc((var(--sidew, 300px) -
     try {
       const out = [];
       const online = new Map(); for (const p of lobbyPeers) if (p.kind === 'viewer' && p.by && p.by !== NET.myId) online.set(p.by, p.presence || {});
-      const recent = load().filter(x => !friends.includes(x.id)).slice(0, 3);
+      const all = load().filter(x => !friends.includes(x.id));
+      try { await lookMetaFor(all.slice(0, 8).map(x => x.id)); } catch (e){}
+      const recent = all.filter(x => online.has(x.id) || !guestGone(x.id)).slice(0, 3);   /* guests who closed their tab are gone for good */
       if (!recent.length){ const n = document.createElement('p'); n.className = 'fnote'; n.textContent = 'People you play with show up here. Or search a name above.'; { const f = document.createElement('div'); f.appendChild(n); syncKids(list, f); } return r; }
       const ids = recent.map(x => x.id);
       await Promise.all(ids.filter(id => !nickCache.has(id)).map(id => fetchNick(id).catch(() => {})));
@@ -22163,10 +22191,10 @@ function aiShowIdeas(bubble, ideas){
    New friend requests pop up as a notification, in a game and on the home screen. */
 {
   const st = document.createElement('style');
-  st.textContent = `#trCounts{display:flex;flex-direction:column;justify-content:center;gap:3px;height:56px;padding:4px 10px;border-radius:10px;min-width:62px;
+  st.textContent = `#trCounts{display:flex;flex-direction:column;justify-content:center;gap:0;height:56px;padding:3px 10px;border-radius:10px;min-width:62px;
   background:linear-gradient(160deg,rgba(255,182,72,.22),rgba(30,24,52,.82) 55%);border:1.5px solid rgba(255,182,72,.75);box-shadow:0 0 0 2px rgba(255,182,72,.14),0 0 14px rgba(255,182,72,.35)}
-#trCounts button{all:unset;display:flex;align-items:center;justify-content:space-between;gap:7px;cursor:pointer;font:800 15px/1 var(--display);color:#fff;padding:2px 0;-webkit-tap-highlight-color:transparent}
-#trCounts button svg{width:19px;height:19px;flex:none;color:#ffd08a}
+#trCounts button{all:unset;flex:1;display:grid;grid-template-columns:20px 20px;align-items:center;justify-content:center;gap:8px;cursor:pointer;font:800 15px/1 var(--display);color:#fff;text-align:center;font-variant-numeric:tabular-nums;-webkit-tap-highlight-color:transparent}
+#trCounts button svg{width:20px;height:20px;flex:none;color:#ffd08a;justify-self:center}
 #trCounts button.hot{color:var(--accent)}
 #trCounts button.hot svg{color:var(--accent);animation:trBump 1.6s ease-in-out infinite}
 @keyframes trBump{0%,70%,100%{transform:none}80%{transform:scale(1.25) rotate(-8deg)}90%{transform:scale(1.1) rotate(6deg)}}
@@ -22182,7 +22210,8 @@ function aiShowIdeas(bubble, ideas){
 #friendsDrawer .fdClose{position:absolute;top:calc(env(safe-area-inset-top,0px) + 10px);left:-50px;width:40px;height:40px;border-radius:12px;border:1.5px solid rgba(255,182,72,.6);background:rgba(14,10,32,.95);color:#fff;display:grid;place-items:center;cursor:pointer}
 #friendsDrawer .fdClose svg{width:18px;height:18px}
 @media (max-width:420px){#friendsDrawer .fdClose{left:auto;right:10px;top:calc(env(safe-area-inset-top,0px) + 8px);z-index:3}}
-html #friendsDrawer .side{box-sizing:border-box!important;overflow-x:hidden!important;min-width:0!important;max-width:100%!important;position:relative!important;top:auto!important;right:auto!important;bottom:auto!important;left:auto!important;transform:none!important;width:100%!important;height:100%!important;max-height:none!important;grid-area:auto!important;flex:1;border-left:0!important;box-shadow:none!important;padding-left:14px!important;padding-right:14px!important;opacity:1!important;visibility:visible!important;display:block!important;overflow-y:auto!important}
+html #friendsDrawer .side{box-sizing:border-box!important;overflow-x:hidden!important;min-width:0!important;max-width:100%!important;position:relative!important;top:auto!important;right:auto!important;bottom:auto!important;left:auto!important;transform:none!important;width:100%!important;height:100%!important;max-height:none!important;grid-area:auto!important;flex:1;border-left:0!important;box-shadow:none!important;padding-left:14px!important;padding-right:14px!important;opacity:1!important;visibility:visible!important;display:flex!important;flex-direction:column!important;gap:10px!important;overflow-y:auto!important}
+html #friendsDrawer .side>*{flex-shrink:0}
 html #friendsDrawer .side>*{opacity:1!important;transform:none!important;pointer-events:auto!important}
 html #friendsDrawer .stab{display:none!important}
 html #friendsDrawer .side *{max-width:100%;box-sizing:border-box}
@@ -24603,6 +24632,147 @@ setInterval(() => { try { if (wkOn('treasure') && HUNT.st && HUNT.st.x == null &
 /* Bridge Egg Madness */
 { const _bb = bwBegin; bwBegin = function(){ const r = _bb.apply(this, arguments); try { if (wkOn('egg') && !BW.m.pr){ addItem({ k: 'i', v: IID['Bridge Egg'] }, 2); invChanged(); } } catch (e){} return r; }; }
 try { if (wkOn('egg')){ const it = BW_SHOP[4][1].find(x => x.i === 'Bridge Egg'); if (it) it.cost = ['au', 1]; } } catch (e){}
+/* ============ guests only last while their tab is open, the owner's player lists stay clean,
+   and the Players tab shows who is banned, muted, kicked or warned ============ */
+
+/* ---- guests: "I'm still here" every few minutes, so lists know their tab is still open ---- */
+setInterval(() => {
+  try { if (isGuest() && NET.db && NET.myId) NET.db.doc('looks/' + NET.myId).update({ t: Date.now(), g: 1, a: 0 }).catch(() => {}); } catch (e){}
+}, 3 * 60000);
+
+/* ---- the owner's game tidies the name list: guests whose tab has been closed for an hour are removed
+   (unless they're banned, muted, have a rank or powers). Accounts are never removed. ---- */
+async function lookCleanup(force){
+  let owner = false; try { owner = amGameOwner; } catch (e){}
+  if (!window.__vxAuth || !owner || !NET.db || !NET.myId || lookCleanup.busy) return 0;
+  if (!force && Date.now() - (lookCleanup.at || 0) < 5 * 60000) return 0;
+  lookCleanup.busy = true; lookCleanup.at = Date.now();
+  let n = 0;
+  try {
+    const s = await NET.db.collection('looks').limit(500).get();
+    const docs = s.docs.map(d => ({ id: d.id, v: d.data() || {} })).filter(d => d.id !== NET.myId);
+    /* older name cards don't say if they're a guest: a guest's public profile has no name (accounts have their first name) */
+    let names = null;
+    if (docs.some(d => d.v.g == null && d.v.a == null)){
+      try { const ps = await NET.db.collection('profiles').limit(1000).get(); names = new Map(); for (const d of ps.docs) names.set(d.id, String((d.data() || {}).name || '').trim()); } catch (e){ names = null; }
+    }
+    for (const d of docs){
+      let guest = d.v.g === 1 ? true : d.v.a === 1 ? false : null;
+      if (guest === null){ if (!names) continue; guest = !names.get(d.id); }
+      const ref = NET.db.doc('looks/' + d.id);
+      if (!guest){ if (d.v.a !== 1) ref.update({ a: 1, g: 0 }).catch(() => {}); continue; }
+      const closed = Date.now() - (+d.v.t || 0) > 60 * 60000;
+      if (!closed || lookProtected(d.id)){ if (d.v.g !== 1) ref.update({ g: 1, a: 0 }).catch(() => {}); continue; }
+      try { await ref.delete(); n++; } catch (e){}
+    }
+  } catch (e){}
+  lookCleanup.busy = false;
+  if (n){ lookDir = null; lookDirCache = null; try { if (!$('adminPanel').hidden) renderMod(); } catch (e){} }
+  return n;
+}
+setInterval(() => { try { lookCleanup(); } catch (e){} }, 60000);
+setTimeout(() => { try { lookCleanup(); } catch (e){} }, 12000);
+{ const _oa = openAdmin; openAdmin = function(){ const r = _oa.apply(this, arguments); try { lookCleanup(); } catch (e){} return r; }; }
+
+/* ---- a ban sticks to the device too, so a guest can't dodge it by closing the tab and coming back as a new guest ---- */
+{
+  const KEY = 'vx-banmark';
+  const read = () => { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e){ return null; } };
+  const _cb = currentBan;
+  currentBan = function(){
+    const b = _cb.apply(this, arguments);
+    try {
+      const me = NET.myId;
+      if (b){ if (me) localStorage.setItem(KEY, JSON.stringify({ id: me, until: b.until || 0, at: b.at || Date.now(), reason: b.reason || '', ac: !MOD.bans[me] })); return b; }
+      const mk = read();
+      if (mk && mk.id && mk.id !== me){
+        const m = MOD.bans[mk.id]; if (activeUntil(m)) return m;
+        if (mk.ac && activeUntil(mk) && !(mk.at <= ((MOD.pardons || {})[mk.id] || 0))) return mk;
+      }
+      /* only forget it once the real ban list has loaded (and it says they're not banned any more) */
+      if (mk && MOD_READY && !(mk.ac && mk.id === me && activeUntil(mk))) localStorage.removeItem(KEY);
+    } catch (e){}
+    return b;
+  };
+}
+
+/* ---- Players tab: who is banned, muted, kicked or warned, right under the player list ---- */
+{
+  const st = document.createElement('style');
+  st.textContent = `#modBans .modli small.k{color:#ffb648}#modBans .modli small.w{color:#c9b8ff}
+#modBans .modli .mtag{display:inline-block;margin-right:6px;padding:1px 7px;border-radius:999px;font:800 10.5px var(--body);letter-spacing:.05em;text-transform:uppercase;vertical-align:1px}
+#modBans .mtag.ban{background:rgba(255,75,92,.18);color:#ff8a95}#modBans .mtag.mute{background:rgba(124,92,255,.2);color:#c9b8ff}
+#modBans .mtag.kick{background:rgba(255,182,72,.18);color:#ffcf85}#modBans .mtag.warn{background:rgba(255,255,255,.1);color:#ddd}
+.admp .gtag{font:700 11px var(--body);color:var(--muted);margin-left:3px}
+/* the friends panel: nothing pokes out past the edge, and the buttons in a row are the same size */
+.side .party{grid-template-columns:minmax(0,1fr)}
+.side .prow input{width:0}
+.side .frow .fbtn:not(.fdel){height:30px;padding:0 11px;display:inline-flex;align-items:center;justify-content:center;flex:none;box-sizing:border-box;line-height:1}
+.side .frow .fbtn.alt:not(.fdel){box-shadow:0 3px 0 rgba(0,0,0,.35)}
+#trOn svg{width:18px!important;height:18px!important}`;
+  document.head.appendChild(st);
+  /* move the list from the Server tab to the Players tab */
+  const move = () => {
+    const bans = $('modBans') && $('modBans').closest('.admcard'), pl = $('admPlayers');
+    if (!bans || !pl) return false;
+    if (bans.parentNode !== pl) pl.appendChild(bans);
+    const h = bans.querySelector(':scope > h3.admh'); if (h && !/kicked/.test(h.textContent)){ const ic = h.querySelector('.hi'); h.textContent = ''; if (ic) h.appendChild(ic); h.append('Banned, muted and kicked'); }
+    return true;
+  };
+  if (!move()) setTimeout(move, 1500);
+  const nameOf = (id, e) => (e && e.nick) || (typeof nickOf === 'function' && nickOf(id)) || nickCache.get(id) || 'Player';
+  const tag = (cls, t) => { const s = document.createElement('span'); s.className = 'mtag ' + cls; s.textContent = t; return s; };
+  const _rm = renderMod;
+  renderMod = function(){
+    const r = _rm.apply(this, arguments);
+    try {
+      move();
+      const bl = $('modBans'); if (!bl) return r;
+      /* label the bans and mutes the first part already listed */
+      for (const li of bl.querySelectorAll('.modli')){
+        const sm = li.querySelector('small'); if (!sm || li.querySelector('.mtag')) continue;
+        const banned = /^Banned/.test(sm.textContent); sm.textContent = sm.textContent.replace(/^(Banned|Muted) /, ''); sm.prepend(tag(banned ? 'ban' : 'mute', banned ? 'Banned' : 'Muted'));
+      }
+      let added = 0;
+      const row = (id, kind, label, text, cls, undo, fn) => {
+        const li = document.createElement('div'); li.className = 'modli'; const sp = document.createElement('span'); const b = document.createElement('b'); b.textContent = nameOf(id, kind);
+        const sm = document.createElement('small'); sm.className = cls; sm.append(tag(cls === 'k' ? 'kick' : 'warn', label), text); sp.append(b, sm);
+        li.append(faceImg(id), sp, modBtn(undo, 'dark', fn)); bl.appendChild(li); added++;
+      };
+      const since = t => { const s = Math.max(1, Math.round((Date.now() - t) / 60000)); return s < 60 ? s + ' min ago' : s < 1440 ? Math.round(s / 60) + 'h ago' : Math.round(s / 1440) + 'd ago'; };
+      /* kicks from the last day, warnings from the last week (newest first) */
+      const ks = Object.entries(MOD.kicks || {}).filter(([, e]) => e && Date.now() - e.at < DAY).sort((a, b) => b[1].at - a[1].at);
+      for (const [id, e] of ks) row(id, e, 'Kicked', since(e.at) + (e.reason ? ' · ' + e.reason : ''), 'k', 'Clear', () => saveMod(m => { delete m.kicks[id]; }));
+      const ws = Object.entries(MOD.warns || {}).filter(([, e]) => e && Date.now() - e.at < 7 * DAY).sort((a, b) => b[1].at - a[1].at);
+      for (const [id, e] of ws) row(id, e, 'Warned', since(e.at) + (e.text ? ' · ' + String(e.text).slice(0, 60) : ''), 'w', 'Clear', () => saveMod(m => { delete m.warns[id]; }));
+      if (added){ const empty = bl.querySelector(':scope > p.fnote'); if (empty) empty.remove(); }
+      else { const empty = bl.querySelector(':scope > p.fnote'); if (empty) empty.textContent = 'Nobody is banned, muted or kicked right now.'; }
+      /* the player picker: people online first, and guests are marked */
+      const box = $('modPeople');
+      if (box && !$('modSearch').value.trim()){
+        const on = trOnline(), btns = [...box.querySelectorAll('.admp')];
+        btns.sort((a, b) => (on.has(b.dataset.id) ? 1 : 0) - (on.has(a.dataset.id) ? 1 : 0)); for (const x of btns) box.appendChild(x);
+      }
+    } catch (e){}
+    return r;
+  };
+}
+/* the picker buttons remember who they are (for sorting and the guest label) */
+{
+  const _rp = renderModPeople;
+  renderModPeople = async function(){
+    const r = await _rp.apply(this, arguments);
+    try {
+      const box = $('modPeople'); if (!box) return r;
+      const dir = lookDirCache || [], on = trOnline();
+      const btns = [...box.querySelectorAll('.admp')];
+      const listed = dir.filter(p => p.nick && p.id !== NET.myId);
+      btns.forEach(b => { const nm = (b.querySelector('b') && b.querySelector('b').firstChild && b.querySelector('b').firstChild.textContent) || ''; const p = listed.find(x => x.nick === nm); if (p){ b.dataset.id = p.id; if (p.g && !b.querySelector('.gtag')){ const g = document.createElement('span'); g.className = 'gtag'; g.textContent = '· guest'; b.querySelector('b').appendChild(g); } } });
+      if (!$('modSearch').value.trim()){ btns.sort((a, b) => (on.has(b.dataset.id) ? 1 : 0) - (on.has(a.dataset.id) ? 1 : 0)); for (const x of btns) box.appendChild(x); }
+    } catch (e){}
+    return r;
+  };
+}
 /* ============ boot & frame loop ============ */
 newWorld(DEFAULT_SEED); syncSettings(); setTimeout(hideLoader, 300); $('ldBar').style.width = '100%'; resize(); selectSlot(0); $('itemName').style.opacity = 0;
 let perfEma = 1 / 60, perfT = 0;
