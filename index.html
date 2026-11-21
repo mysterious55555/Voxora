@@ -35,7 +35,7 @@ window.VOX_LOGINS = ['google'];
   /* guests (not logged in): everything the game remembers in this browser (name, look, parkour, gifts...) lives in this tab only.
      A refresh keeps it; closing the tab clears it. Device settings (graphics, sound...) still stick around. */
   const ACCT = 'vx-acct';
-  const KEEP = new Set(['vx-banmark', 'vx-settings', 'vx-side', 'vx-settab', 'vx-news', 'vx-prefs', 'vx-stats-ui', 'vx-aiopts', 'vx-aikey', ACCT]);
+  const KEEP = new Set(['vx-banmark', 'vx-combat', 'vx-settings', 'vx-side', 'vx-settab', 'vx-news', 'vx-prefs', 'vx-stats-ui', 'vx-aiopts', 'vx-aikey', ACCT]);
   let GUEST_TAB = false;
   try { GUEST_TAB = localStorage.getItem(ACCT) !== '1'; } catch (e){}
   if (GUEST_TAB) try {
@@ -4727,17 +4727,21 @@ function buildCharacter(L){
   if (HAS(L, 'extra', 'tail')){ const tl = pv(g, 0, .74, -.11); tl.rotation.x = .45; const or = lam({ color: L.hair }), tip = lam({ color: '#f7f4ee' }); box(tl, .12, .12, .2, or, 0, 0, -.1); box(tl, .15, .15, .2, or, 0, 0, -.28); box(tl, .12, .12, .12, tip, 0, 0, -.44); }
   if (HAS(L, 'extra', 'shield')){ const sb = lam({ color: '#2a5aa8' }), gd = lam({ color: '#f5c842' }); box(g, .4, .44, .04, sb, 0, 1.06, -.15); box(g, .44, .04, .045, gd, 0, 1.06, -.15); box(g, .04, .48, .045, gd, 0, 1.06, -.15); box(g, .1, .1, .05, gd, 0, 1.06, -.155); }
   if (HAS(L, 'extra', 'sword')){ const sw = pv(g, -.08, 1.05, -.15); sw.rotation.z = .7; box(sw, .05, .6, .03, lam({ color: '#cdd5df' }), 0, .1, 0); box(sw, .18, .04, .05, lam({ color: '#d8a93a' }), 0, -.2, 0); box(sw, .05, .14, .05, lam({ color: '#6b4a2a' }), 0, -.3, 0); }
-  return { g, headPivot, legL, legR, armL, armR, held, cape };
+  /* everything above the hips sits in one group that pivots at the hips, so the body can bend forward (crouching) */
+  const up = new THREE.Group(); up.name = 'vxUpper'; up.position.set(0, .68, 0);
+  for (const ch of [...g.children]) if (ch !== legL && ch !== legR){ g.remove(ch); ch.position.y -= .68; up.add(ch); }
+  g.add(up);
+  return { g, headPivot, legL, legR, armL, armR, held, cape, up };
 }
 let myLook = LOOK_DEFAULT;
 try { myLook = sanitizeLook(JSON.parse(localStorage.getItem('vx-look') || 'null')); } catch (e){}
 const player = new THREE.Group(); scene.add(player);
-let headPivot, legL, legR, armL, armR, heldOnModel, capeP;
+let headPivot, legL, legR, armL, armR, heldOnModel, capeP, upperP;
 const skinM = lam({ color: '#d9a27e' });
 function applyMyLook(L){
   myLook = sanitizeLook(L); while (player.children.length) player.remove(player.children[0]);
   const c = buildCharacter(myLook); for (const ch of [...c.g.children]) player.add(ch);
-  headPivot = c.headPivot; legL = c.legL; legR = c.legR; armL = c.armL; armR = c.armR; heldOnModel = c.held; capeP = c.cape;
+  headPivot = c.headPivot; legL = c.legL; legR = c.legR; armL = c.armL; armR = c.armR; heldOnModel = c.held; capeP = c.cape; upperP = c.up;
   skinM.color.set(myLook.skin);
 }
 applyMyLook(myLook);
@@ -4784,6 +4788,9 @@ function collides(p){
 }
 const pos = new THREE.Vector3(), prev = new THREE.Vector3(), vel = new THREE.Vector3(), rpos = new THREE.Vector3();
 let onGround = false, isJumping = false, jumpTimer = 0, jumpCount = 0, flying = false;
+/* crouching: hold C (or the crouch button on touch screens). Slow and careful: you won't walk off an edge */
+let crouchOn = false, crouchK = 0, crouchTouch = false, KB_T = 0;
+function footSolid(px, py, pz){ const y = Math.floor(py); for (let x = Math.floor(px - HW); x <= Math.floor(px + HW - 1e-6); x++) for (let z = Math.floor(pz - HW); z <= Math.floor(pz + HW - 1e-6); z++) if (solidAt(x, y, z)) return true; return false; }
 /* bunny hop: press jump again right as you land (while moving) to chain hops; 3 is the top speed */
 let bhop = 0, landT = 9, pressT = 9, jumpPrev = false, wasGround = false, hopChain = false, peakY = 0;
 const BHOP_WINDOW = .2, BHOP_BOOST = .14;
@@ -4829,6 +4836,7 @@ function step(dt, inp){
   if (wl > 1){ wx /= wl; wz /= wl; }
   const swim = liquidAt(.4) || liquidAt(1.2), lava = swim === I.LAVA;
   if (swim) waterT = 0; else waterT += dt;
+  const sneak = !!inp.crouch && !flying && !swim; crouchOn = sneak;
   if (flying){
     const sp = PHYS.flySpeed * (inp.sprint ? 1.8 : 1);
     const k = Math.min(1, dt * 10);
@@ -4836,7 +4844,7 @@ function step(dt, inp){
     const rising = flyRiseT > 0; if (rising) flyRiseT -= dt;
     vel.y += ((((inp.jump || rising) ? 1 : 0) - (inp.down ? 1 : 0)) * sp * .75 - vel.y) * k;
   } else {
-    let maxS = inp.sprint ? PHYS.sprintSpeed : PHYS.walkSpeed; if (swim) maxS *= lava ? .35 : .55; else maxS *= 1 + (typeof isSurvival === 'function' && isSurvival() ? .05 : .2) * bhop;
+    let maxS = inp.sprint && !sneak ? PHYS.sprintSpeed : PHYS.walkSpeed; if (sneak) maxS = PHYS.walkSpeed * .34; if (swim) maxS *= lava ? .35 : .55; else maxS *= 1 + (typeof isSurvival === 'function' && isSurvival() ? .05 : .2) * bhop;
     if (wl > .05){
       const dx = wx * maxS - vel.x, dz = wz * maxS - vel.z, dl = Math.hypot(dx, dz);
       if (dl > 1e-6){ const f = Math.min(PHYS.moveForce * (onGround ? 1 : PHYS.airMoveMult), PHYS.responsiveness * dl); vel.x += dx / dl * f * dt; vel.z += dz / dl * f * dt; }
@@ -4877,6 +4885,8 @@ function step(dt, inp){
   if (performance.now() < BOUNCE_T){ /* a bounce pad just launched you: let it carry you up */ }
   else if (!flying && !swim && (typeof isSurvival !== 'function' || isSurvival())) vel.y = Math.min(vel.y, PHYS.jumpImpulse + 1.5);
   else if (!flying && !swim) vel.y = Math.min(vel.y, PHYS.jumpImpulse + 4);
+  /* crouching on the ground: stop at the edge instead of walking off (a hit can still knock you off) */
+  if (sneak && onGround && performance.now() > KB_T){ const fy = pos.y - .06; if (!footSolid(pos.x + vel.x * dt, fy, pos.z)) vel.x = 0; if (!footSolid(pos.x, fy, pos.z + vel.z * dt)) vel.z = 0; }
   const bX = moveAxis('x', vel.x * dt), bZ = moveAxis('z', vel.z * dt);
   if (bX) vel.x = 0; if (bZ) vel.z = 0;
   if ((bX || bZ) && wl > .05 && !flying){
@@ -5049,7 +5059,7 @@ function getInput(){
   if (jl > .12){ x += joyVec.x; z += -joyVec.y; }
   const shift = keys.ShiftLeft || keys.ShiftRight;
   const sprint = (flying ? false : shift) || keys.ControlLeft || keys.ControlRight || (sprintTap && (keys.KeyW || keys.ArrowUp)) || jl > .97;
-  return { x, z, jump: !!(keys.Space || jumpTouch), sprint: !!sprint && z > 0, down: flying && (!!shift || downTouch) };
+  return { x, z, jump: !!(keys.Space || jumpTouch), sprint: !!sprint && z > 0, down: flying && (!!shift || downTouch), crouch: !flying && !!(keys.KeyC || crouchTouch) };
 }
 const locked = () => document.pointerLockElement === canvas;
 function tryLock(){ if (isTouch) return; try { const p = canvas.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
@@ -5118,7 +5128,7 @@ canvas.addEventListener('pointerdown', e => {
   if (chatOpen){ closeChat(); if (e.pointerType !== 'mouse') return; }
   if (modal){ closeModal(); return; }
   if (e.pointerType === 'mouse'){
-    if (locked()){ if (e.button === 0) mineHeld = true; else if (e.button === 2) placeBlock(); else if (e.button === 1){ e.preventDefault(); pickBlock(); } return; }
+    if (locked()){ if (e.button === 0){ mineHeld = true; if (!targetPlayer && !targetMob) try { atkMiss(); } catch (er){} } else if (e.button === 2) placeBlock(); else if (e.button === 1){ e.preventDefault(); pickBlock(); } return; }
     mouseDrag = { moved: 0, button: e.button }; if (e.button === 0) mineHeld = true; tryLock(); return;
   }
   e.preventDefault();
@@ -5641,9 +5651,11 @@ async function enterWorld(w){
         for (const p of ch.left){ waiting.delete(p.peer); const n = told.get(p.peer) || (avatars.get(p.peer) || {}).name || nameFor(p); told.delete(p.peer); if (n && n !== 'Player' && p.kind === 'viewer' && !p.sameTab) sys(n + ' left', 'join'); }
         const here = new Set();
         for (const p of ch.peers){ if (p.sameTab){ NET.myPeer = p.peer; continue; } if (p.kind !== 'viewer') continue; here.add(p.peer); if (!avatars.has(p.peer) || ch.updated.includes(p) || ch.joined.includes(p)) upsertAvatar(p); }
-        for (const p of ch.updated){ const h = p.presence && p.presence.h; if (p.sameTab || !Array.isArray(h) || h[0] !== NET.myPeer || seenHits.get(p.peer) === h[1]) continue; seenHits.set(p.peer, h[1]); onHit({ peer: p.peer, sameTab: false, data: { to: h[0], d: h[2], kx: h[3], kz: h[4], up: h[5], kb: h[6], w: typeof h[7] === 'string' ? h[7].slice(0, 20) : 'fist' } }); }
+        for (const p of ch.updated){ const h = p.presence && (p.presence.hit || p.presence.h); if (p.sameTab || !Array.isArray(h) || h[0] !== NET.myPeer || seenHits.get(p.peer) === h[1]) continue; seenHits.set(p.peer, h[1]); onHit({ peer: p.peer, sameTab: false, data: { to: h[0], d: h[2], kx: h[3], kz: h[4], up: h[5], kb: h[6], w: typeof h[7] === 'string' ? h[7].slice(0, 20) : 'fist', n: h[8], c: h[9], r: h.length < 10 || h[10] === 1 ? 1 : 0 } }); }
+        /* someone hit someone else: show the hit on them too (sparks, flash, number) */
+        for (const p of ch.updated){ const h = p.presence && (p.presence.hit || p.presence.h); if (p.sameTab || !Array.isArray(h) || h[0] === NET.myPeer || seenFx.get(p.peer) === h[1]) continue; seenFx.set(p.peer, h[1]); try { cbSeenHit(p.peer, h); } catch (e){} }
         for (const p of ch.updated){ try { onFxPresence(p); } catch (e){} }
-        for (const p of ch.joined){ const h = p.presence && p.presence.h; if (Array.isArray(h)) seenHits.set(p.peer, h[1]); }
+        for (const p of ch.joined){ const h = p.presence && (p.presence.hit || p.presence.h); if (Array.isArray(h)){ seenHits.set(p.peer, h[1]); seenFx.set(p.peer, h[1]); } }
         for (const id of [...avatars.keys()]) if (!here.has(id)) removeAvatar(id);
         updatePlayers();
       }, () => {}));
@@ -5778,7 +5790,7 @@ function renderSuggest(){
 }
 
 /* ---- other players in your world ---- */
-const avatars = new Map(), seenHits = new Map(), seenInv = new Map();
+const avatars = new Map(), seenHits = new Map(), seenFx = new Map(), seenInv = new Map();
 /* developers get a gray wrench badge on their name tag (tied to their account, not just the name) */
 /* ranks: each has a name, a color, a line icon (24x24 path) and the accounts that have it.
    New ranks are added here and show up the same way on name tags, in chat and on the home page. */
@@ -5827,7 +5839,7 @@ function nameTag(text, id){
 }
 function makeAvatar(code){
   const c = buildCharacter(lookFrom(code)); const g = c.g;
-  g.userData = { hp: c.headPivot, ll: c.legL, lr: c.legR, al: c.armL, ar: c.armR, cape: c.cape, held: c.held };
+  g.userData = { hp: c.headPivot, ll: c.legL, lr: c.legR, al: c.armL, ar: c.armR, cape: c.cape, held: c.held, up: c.up };
   return g;
 }
 const peerHere = (peer, wid) => NET.wid === wid && NET.wroom && NET.wroom.peers().some(x => x.peer === peer);
@@ -5861,7 +5873,7 @@ async function upsertAvatar(p){
     a.lastT = now;
   }
   a.tgt.set(P[0], P[1], P[2]); a.hurt = a.hurt || 0;
-  const R = Array.isArray(pr.r) ? pr.r : [0, 0]; a.yaw = +R[0] || 0; a.pitch = +R[1] || 0;
+  const R = Array.isArray(pr.r) ? pr.r : [0, 0]; a.yaw = +R[0] || 0; a.pitch = +R[1] || 0; a.cr = pr.cr === 1; a.cb = Math.min(999, Math.max(0, pr.cb | 0));
   if (!('koSeen' in a)) a.koSeen = Array.isArray(pr.ko) ? pr.ko[1] : null;   /* old knockouts from before we met don't count */
   if (typeof pr.dv === 'string') a.dv = ['phone', 'tablet', 'pc'].includes(pr.dv) ? pr.dv : 'unknown';
   if (Array.isArray(pr.ko) && pr.ko[1] !== a.koSeen){ const mine = pr.ko[0] === NET.myPeer, ka = avatars.get(pr.ko[0]); if (mine) try { creditKO(a.real || a.name || 'a player'); } catch (e){} a.koSeen = pr.ko[1]; scriptEvent('kill', [mine ? lobbyName(NET.myId || 'me', myName()) : ka ? ka.name : 'Someone', a.name, typeof pr.ko[2] === 'string' ? pr.ko[2].slice(0, 20) : 'fist']); }   /* they were knocked out by you */
@@ -5892,7 +5904,7 @@ function updateAvatars(dt){
     /* same smooth walking, jumping and attack swings as your own character */
     if (a.swk >= 0){ a.swk += dt / SWING_DUR; if (a.swk >= 1) a.swk = -1; }
     if (!a.anim) a.anim = {};
-    const tw = poseRig({ hp: u.hp, ll: u.ll, lr: u.lr, al: u.al, ar: u.ar, cape: u.cape }, a.anim, { spd: a.spd, air, fly, sprint: a.spd > 6.2, phase: a.phase, swing: a.swk >= 0 ? a.swk : -1, pitch: a.pitch }, dt);
+    const tw = poseRig({ hp: u.hp, ll: u.ll, lr: u.lr, al: u.al, ar: u.ar, cape: u.cape, up: u.up }, a.anim, { spd: a.spd, air, fly, sprint: a.spd > 6.2 && !a.cr, phase: a.phase, swing: a.swk >= 0 ? a.swk : -1, pitch: a.pitch, crouch: a.cr }, dt);
     a.model.rotation.y = a.ryaw + Math.PI + tw;
     a.ld.copy(a.cur);
   }
@@ -5900,7 +5912,7 @@ function updateAvatars(dt){
 let presT = 0, lastPres = '', presBeat = 0;
 function sendPresence(dt){
   if (!NET.wroom || !started) return; presT -= dt; presBeat -= dt; if (presT > 0) return; presT = window.VOX_FIREBASE ? .066 : .1;   /* 15 updates a second on the website */
-  const pr = { p: [+pos.x.toFixed(2), +pos.y.toFixed(2), +pos.z.toFixed(2)], r: [+yaw.toFixed(2), +pitch.toFixed(2)], f: flying ? 1 : 0, k: lookCode(myLook), n: myName().slice(0, 16), s: gameMode === 'spectator' ? 1 : 0, sw: ANIM_ME.cnt, ko: RUN.ko || undefined, dv: DEV.kind, am: armCode() || undefined, h: heldCode() || undefined };
+  const pr = { p: [+pos.x.toFixed(2), +pos.y.toFixed(2), +pos.z.toFixed(2)], r: [+yaw.toFixed(2), +pitch.toFixed(2)], f: flying ? 1 : 0, k: lookCode(myLook), n: myName().slice(0, 16), s: gameMode === 'spectator' ? 1 : 0, sw: ANIM_ME.cnt, ko: RUN.ko || undefined, dv: DEV.kind, am: armCode() || undefined, h: heldCode() || undefined, cr: crouchOn ? 1 : undefined, cb: ATK.combo >= 2 ? ATK.combo : undefined };
   const s = JSON.stringify(pr); if (s === lastPres && presBeat > 0) return; lastPres = s; presBeat = 4;
   pr.tm = Math.round(performance.now());   /* when this was sent, so others can play your movement back exactly */
   NET.wroom.presence(pr).catch(() => {});
@@ -6199,8 +6211,8 @@ function updateMining(dt){
   mineCool = Math.max(0, mineCool - dt);
   const t = target;
   atkCool = Math.max(0, atkCool - dt);
-  if (mineHeld && targetPlayer && started && !modal && !chatOpen && !SURV.dead){ crackMesh.visible = false; mineProg = 0; if (atkCool <= 0){ attackPlayer(targetPlayer); atkCool = .4; } return; }
-  if (mineHeld && targetMob && started && !modal && !chatOpen && !SURV.dead){ crackMesh.visible = false; mineProg = 0; if (atkCool <= 0){ attackMob(targetMob); atkCool = .4; } return; }
+  if (mineHeld && targetPlayer && started && !modal && !chatOpen && !SURV.dead){ crackMesh.visible = false; mineProg = 0; if (atkReady()){ attackPlayer(targetPlayer); atkCool = .4; } return; }
+  if (mineHeld && targetMob && started && !modal && !chatOpen && !SURV.dead){ crackMesh.visible = false; mineProg = 0; if (atkReady()){ attackMob(targetMob); atkCool = .4; } return; }
   if (!canBuild()){ crackMesh.visible = false; mineProg = 0; return; }
   if (!mineHeld || !t || !started || modal || chatOpen || SURV.dead){ mineProg = 0; mineKey = ''; crackMesh.visible = false; return; }
   if (swingT <= 0) swingT = .25;
@@ -7437,7 +7449,7 @@ function rayPlayers(o, d, max){
   let best = null, bt = max;
   for (const a of avatars.values()){
     if (a.model && a.model.visible === false) continue;   /* someone watching unseen is not in the way */
-    const mn = [a.cur.x - .35, a.cur.y, a.cur.z - .35], mx = [a.cur.x + .35, a.cur.y + 1.9, a.cur.z + .35];
+    const mn = [a.cur.x - .35, a.cur.y, a.cur.z - .35], mx = [a.cur.x + .35, a.cur.y + (a.cr ? 1.6 : 1.9), a.cur.z + .35];   /* crouching players are a bit shorter */
     let t0 = 0, t1 = bt, ok = true; const oo = [o.x, o.y, o.z], dd = [d.x, d.y, d.z];
     for (let k = 0; k < 3; k++){
       if (Math.abs(dd[k]) < 1e-9){ if (oo[k] < mn[k] || oo[k] > mx[k]){ ok = false; break; } continue; }
@@ -7455,23 +7467,46 @@ function attackPlayer(a){
   if (!NET.wroom) return;
   const th = hotbar[sel]; let d = 1;
   if (th && th.k === 'i'){ const it = ITEMS[th.v], mat = it.name.split(' ')[0]; if (it.kind === 'sword') d = SWORD_DMG[mat] || 4; else if (it.kind === 'axe' || it.kind === 'hammer') d = (SWORD_DMG[mat] || 4) - 1; else if (it.kind === 'pickaxe') d = 2; }
-  const kx = a.cur.x - pos.x, kz = a.cur.z - pos.z, kl = Math.hypot(kx, kz) || 1;
-  /* hits ride on presence so every player can fight, not just editors */
-  NET.wroom.presence({ h: [a.peer, Date.now() + Math.random(), atkBoost(d), +(kx / kl).toFixed(3), +(kz / kl).toFixed(3), comboUp, comboKb, th ? th.k + ':' + th.v : 'fist'] }).catch(() => {});
-  hitPuff(a.cur); exhaust(.1);
+  const kx = a.cur.x - pos.x, kz = a.cur.z - pos.z, kl = Math.hypot(kx, kz) || 1, dmg = atkBoost(d), crit = ATK.crit ? 1 : 0;
+  /* hits ride on presence so every player can fight, not just editors.
+     It has its own key ("hit"), so the 15-a-second movement updates never wipe it out before others see it.
+     [who, hit id, damage, push x, push z, launch up, knockback, weapon, combo count, critical, ranged] */
+  NET.wroom.presence({ hit: [a.peer, Date.now() + Math.random(), dmg, +(kx / kl).toFixed(3), +(kz / kl).toFixed(3), 0, comboKb, th ? th.k + ':' + th.v : 'fist', ATK.combo, crit] }).catch(() => {});
+  try { cbLanded(a.cur, ATK.combo, !!crit, dmg, false, a); } catch (e){}
+  exhaust(.1);
   scriptEvent('hit', [myName(), a.name]);
 }
+const HIT_LAST = new Map();
 function onHit(msg){
   const d = msg.data || {}; if (!NET.myPeer || d.to !== NET.myPeer || msg.sameTab) return;
   if (!pvpOn()) return;
-  const att = avatars.get(msg.peer), an = att ? att.name : 'Someone';
-  const dmg = clamp(+d.d || 1, 1, 12);
+  const att = avatars.get(msg.peer); if (!att || !att.cur) return;
+  const an = att.name || 'Someone', now = performance.now();
+  /* the player who gets hit checks it's a real hit: the attacker has to be close by, and can't hit
+     faster than the cooldown (so a hit can never count twice) */
+  const ax = pos.x - att.cur.x, az = pos.z - att.cur.z, ay = pos.y - att.cur.y, ranged = +d.r === 1;
+  /* arrows, snowballs and blasts come from further away (but not from across the map) */
+  if (ranged ? ax * ax + az * az > 80 * 80 : (ax * ax + az * az > 6.5 * 6.5 || Math.abs(ay) > 5)) return;
+  const gk = ranged ? msg.peer + ':r' : msg.peer;
+  if (now - (HIT_LAST.get(gk) || 0) < (ranged ? 120 : 300)) return;
+  HIT_LAST.set(gk, now);
+  const crit = +d.c === 1, dmg = clamp(Math.round(+d.d || 1), 1, 14);
   if (isSurvival()) damage(dmg, 'pvp', an);
-  const up = clamp(+d.up || 0, 0, 14), kb = (up ? 7.5 : 6) * clamp(+d.kb || 1, .5, 2);
-  vel.x += clamp(+d.kx || 0, -1, 1) * kb; vel.z += clamp(+d.kz || 0, -1, 1) * kb;
-  if (up){ vel.y = up; onGround = false; try { ACS.grace = performance.now() + 4000; ACS.prev = null; } catch (e){} if (up >= 10) toast(an + ' launched you!'); }
-  else if (onGround) vel.y = 5;
+  /* knockback: straight away from where the attacker really is. It replaces your speed instead of adding to it,
+     so hits in a row never stack up into a huge launch, and you never get thrown sideways */
+  let kx = ax, kz = az, kl = Math.hypot(kx, kz);
+  if (kl < .15 || ranged){ kx = clamp(+d.kx || 0, -1, 1); kz = clamp(+d.kz || 0, -1, 1); kl = Math.hypot(kx, kz) || 1; }
+  kx /= kl; kz /= kl;
+  const kbm = clamp(+d.kb || 1, .5, 2.5), H = 6.4 * kbm;
+  vel.x = vel.x * .3 + kx * H; vel.z = vel.z * .3 + kz * H;
+  const hv = Math.hypot(vel.x, vel.z), cap = 9.6 * Math.max(1, kbm); if (hv > cap){ vel.x *= cap / hv; vel.z *= cap / hv; }
+  const up = clamp(+d.up || 0, 0, 14);   /* some throwables and blasts launch you up */
+  vel.y = up ? Math.max(vel.y, up) : onGround ? 5.6 : Math.min(5.6, Math.max(vel.y, -12) * .5 + 5.6);
+  onGround = false; KB_T = now + 400;
+  try { ACS.grace = Math.max(ACS.grace, now + 1200); ACS.prev = null; } catch (e){}
+  try { cbGotHit(att, dmg, crit); } catch (e){}
   scriptEvent('hit', [an, myName()]);
+  return true;
 }
 
 /* ============ lobby scripts: run inside a Web Worker so they can't touch the page ============ */
@@ -9589,6 +9624,7 @@ $('admCreate').addEventListener('click', async () => {
 cmd('admin', { desc: 'Open the admin panel (game owner only)', run(){ openAdmin(); } });
 /* ============ bell: recent updates to the game ============ */
 const NEWS = [
+  { id: 64, date: 'Nov 20', title: 'Better PvP and crouching', items: ['Combos: every hit in a row on the same player counts. No timer: your combo only ends when you miss a swing, get hit, hit someone else, or they get away. You can see other players\' combos above their heads.', 'Critical hits: hit while you are falling for 1.5x damage, a star burst and CRITICAL!', 'Hits feel better: sparks, a hit marker, damage numbers, new sounds, screen shake when you get hit, and an attack cooldown bar under the crosshair.', 'Knockback pushes straight back and no longer stacks up into huge launches. Hits also get through more reliably while moving.', 'Crouch: hold C (or tap the new crouch button). Your character bends forward, you move slowly, and you won\'t walk off edges.', 'Settings > Combat: turn any of the effects off (handy on older devices).'] },
   { id: 63, date: 'Nov 20', title: 'Guests and a tidier friends panel', items: ['Playing without signing in: refreshing keeps your guest, closing the tab ends it. Next time you are a new guest. Sign in to keep your name and progress.', 'Guests who closed their tab no longer show up in player lists or Recently Played.', 'The friends panel in a game has even spacing now, and the friends and online box at the top is lined up.'] },
   { id: 62, date: 'Nov 20', title: 'Fixes: walking and jumping', items: ['Other players\' arms and legs move again when they walk and run (they looked stiff before).', 'Building up (jump and place a block under you) or hopping up steps no longer gets you flagged for jumping too high.'] },
   { id: 61, date: 'Nov 20', title: 'Profiles and weekly events', items: ['Tap your picture on the home screen (or Menu > Profile) to see your profile: awards, parkour stars, Bedwars rank and wins, treasures and your favourite mode.', 'Tap a friend\'s picture in your friends list to see their profile.', 'A new weekly event every Monday: Treasure Week, Bridge Egg Madness, Boss Week, Pet Week and Speed Week. Look for the banner on the home screen.'] },
@@ -11792,7 +11828,8 @@ window.__vxSfx = {
   hurt(){ tone(240, 120, .16, .22, 'square'); },
   mob(){ noise(.08, 700, 1.2, .35); tone(300, 160, .1, .14, 'sawtooth'); },
   jump(){ },
-  _tone: (a, b, d, v, t) => tone(a, b, d, v, t)
+  _tone: (a, b, d, v, t) => tone(a, b, d, v, t),
+  _noise: (d, f, q, v) => noise(d, f, q, v)
 };
 const S = window.__vxSfx;
 /* hook into the game */
@@ -13834,81 +13871,63 @@ setInterval(() => {
   showDiscover(name, 'New biome discovered!', look[1], 'biome', look[0]);
 }, 1000);
 /* ============ combat
-   - you can spam click: a hit lands every 0.4s no matter how fast you click, and a click during the
-     cooldown is remembered and lands the moment the cooldown ends (smooth, no "dead" clicks)
-   - knockback pushes them away, so you chase them to keep hitting; each hit on the same person within
-     about a second keeps your combo going, and getting hit back breaks it
-   - the first hit while sprinting knocks back extra hard
-   - hits while you're in the air (falling) are critical: 1.3x damage
-   - combos hit a bit harder and launch higher: 3 = hop, 5 = big pop, 7+ = sky high
-   no counter or ring on screen: combo hits throw bright sparks, a rising sound and launch higher ============ */
-const ATK = { last: 0, target: null, combo: 0, crit: false, want: null, wantT: 0 };
-const ATK_CD = 400, ATK_CHAIN = 1150, ATK_CHAIN_AIR = 1600, ATK_BUF = 300;
-const comboTier = n => n >= 7 ? 4 : n >= 5 ? 3 : n >= 2 ? 2 : 1;
-const comboLaunch = n => n >= 7 ? 13 : n >= 5 ? 10 : n === 3 ? 6 : 0;
-/* damage: +1 from the 3rd hit, +2 from the 6th; critical hits 1.3x */
-function atkBoost(d){ let v = d + (ATK.combo >= 6 ? 2 : ATK.combo >= 3 ? 1 : 0); if (ATK.crit) v = Math.round(v * 1.3); return Math.max(1, v); }
-function atkTone(n, crit){ try { const S = window.__vxSfx; if (!S || !S._tone) return; const f = 300 * Math.pow(1.07, Math.min(n, 10)); S._tone(f, f * 1.5, .07, .12, 'square'); if (crit) setTimeout(() => S._tone(1400, 1900, .06, .09, 'triangle'), 35); if (comboLaunch(n) >= 10) setTimeout(() => S._tone(f * 1.6, f * 2.4, .14, .12, 'triangle'), 60); } catch (e){} }
-/* combo sparks: bright additive sparks that grow with the chain (pooled, so no lag) */
-const COMBO_COL = [0, 0xffffff, 0xffd24a, 0xff8a3c, 0x7fd8ff];
-function comboSparks(p, n, crit){
-  const t = comboTier(n); if (t < 2 && !crit) return;
-  const col = crit ? 0xffe27a : COMBO_COL[t], cnt = crit ? 10 : 4 + t * 3, y = p.y + 1.1;
-  for (let i = 0; i < cnt; i++){ const a = Math.random() * Math.PI * 2, sp = (2 + t) * (.5 + Math.random() * .7); fx('spark', p.x + (Math.random() - .5) * .3, y + (Math.random() - .5) * .5, p.z + (Math.random() - .5) * .3, { color: col, add: true, vx: Math.cos(a) * sp, vz: Math.sin(a) * sp, vy: 1.5 + Math.random() * (2 + t), life: .35 + Math.random() * .25, s0: .22 + t * .04, s1: .02, grav: 9, drag: 2 }); }
-  if (comboLaunch(n) >= 6) for (let i = 0; i < 8; i++) fx('spark', p.x, y - .9, p.z, { color: col, add: true, vx: (Math.random() - .5) * 1.2, vz: (Math.random() - .5) * 1.2, vy: 6 + Math.random() * 5, life: .5, s0: .28, s1: .04, grav: 4 });
-}
-function comboFx(n, crit, p){ try { if (p) comboSparks(p, n, crit); } catch (e){} atkTone(n, crit); }
+   - one hit lands every 0.4s however fast you click. Clicks during the cooldown are ignored (no hit, no miss)
+   - combo = hits in a row on the same opponent. There is NO timer: it keeps going until you swing and miss,
+     you get hit, you hit someone else, they get away (over 12 blocks), or one of you dies. Every player tracks their own
+   - critical hit: hitting while you're falling (in the air, going down, not flying or swimming): 1.5x damage
+   - the first hit while sprinting knocks back extra far
+   - the player who gets hit works out the knockback from where the attacker really is (p15) ============ */
+const ATK = { last: 0, target: null, combo: 0, crit: false, sprint: false, offT: 0, swingAt: 0 };
+const ATK_CD = 400;
+/* damage: the weapon's damage, 1.5x on a critical hit (potions and Bedwars upgrades add on top, p41/p50) */
+function atkBoost(d){ let v = d; if (ATK.crit) v = Math.round(v * 1.5); return Math.max(1, v); }
 const isSprinting = () => Math.hypot(vel.x, vel.z) > PHYS.walkSpeed + .4;
+const isCritNow = () => !onGround && !flying && vel.y < -1 && !liquidAt(.4);
+const atkReady = () => performance.now() - ATK.last >= ATK_CD;
+function comboBreak(){ if (ATK.combo || ATK.target){ ATK.combo = 0; ATK.target = null; try { cbCombo(0); } catch (e){} } }
+/* a swing that hits nobody: it breaks your combo */
+function atkMiss(){ if (!atkReady() || !ATK.combo) return; swingT = .25; try { cbSwingSnd(); } catch (e){} comboBreak(); }
 /* returns true when a hit should land now */
 function atkGate(target){
-  const now = performance.now(), dt = now - ATK.last;
+  const now = performance.now();
   swingT = .25;
-  if (dt < ATK_CD){ ATK.want = null; return false; }   /* a click during the cooldown just swings; it never lands a late extra hit */
-  ATK.want = null;
-  const falling = !onGround && !flying && vel.y < -1;
-  const chain = falling ? ATK_CHAIN_AIR : ATK_CHAIN;
-  const isMob = !target || !target.cur;  /* combos are only for fighting people, not animals or monsters */
-  ATK.combo = !isMob && target === ATK.target && dt <= chain ? ATK.combo + 1 : 1;
-  ATK.crit = falling; ATK.target = target; ATK.last = now;
+  if (now - ATK.last < ATK_CD) return false;
+  ATK.combo = target === ATK.target ? ATK.combo + 1 : 1;
+  ATK.crit = isCritNow(); ATK.sprint = isSprinting(); ATK.target = target; ATK.last = now;
+  try { cbSwingSnd(); } catch (e){}
   return true;
 }
+/* old name, still used by a few effects: a burst of sparks */
+function comboSparks(p, n, crit){ try { cbBurst(p.x, p.y + 1, p.z, !!crit, 1); } catch (e){} }
 const atkAlive = t => t && (t.cur ? [...avatars.values()].includes(t) : !t.dead && mobs.includes(t));
 {
   const _ap = attackPlayer;
   attackPlayer = function(a){
-    if (!pvpOn()){ swingT = .25; const n = performance.now(); if (n - (ATK.offT || 0) > 1500){ ATK.offT = n; toast('PvP is off in this lobby'); } return; }
+    if (!pvpOn()){ swingT = .25; const n = performance.now(); if (n - ATK.offT > 1500){ ATK.offT = n; toast('PvP is off in this lobby'); } return; }
+    /* a hit that can't land (spawn is a safe zone, or not connected) never counts toward a combo */
+    const safe = typeof SAFE_R !== 'undefined' && isSurvival() && !inBedwars() && (spawnDist(pos.x, pos.z) < SAFE_R || (a && a.cur && spawnDist(a.cur.x, a.cur.z) < SAFE_R));
+    if (safe || !NET.wroom){ swingT = .25; return _ap.apply(this, arguments); }
     if (!atkGate(a)) return;
-    const n = ATK.combo, crit = ATK.crit;
-    comboUp = comboLaunch(n); comboKb = (n === 1 && isSprinting() ? 1.45 : 1) + Math.min(n - 1, 6) * .04;
-    try { return _ap.apply(this, arguments); } finally { comboUp = 0; comboKb = 1; comboFx(n, crit, a.cur); ATK.crit = false; }
+    const kb0 = comboKb; comboUp = 0; if (ATK.sprint && ATK.combo === 1) comboKb = kb0 * 1.5;
+    try { return _ap.apply(this, arguments); } finally { comboKb = kb0; ATK.crit = false; }
   };
   const _am = attackMob;
   attackMob = function(m){
     if (!atkGate(m)) return;
-    const n = ATK.combo, crit = ATK.crit, sprint = n === 1 && isSprinting(), r = _am.apply(this, arguments);
-    if (m && !m.dead && m.v){
-      if (sprint && m.type !== 'golem'){ m.v.x *= 1.45; m.v.z *= 1.45; }
-      const up = comboLaunch(n); if (up){ m.v.y = m.type === 'golem' ? up * .3 : up * .85; m.ground = false; }
-    }
-    if (m && m.p) hitPuff({ x: m.p.x, y: m.p.y - .6, z: m.p.z });
-    comboFx(n, crit, m && m.p ? { x: m.p.x, y: m.p.y - .6, z: m.p.z } : null); ATK.crit = false; return r;
+    const n = ATK.combo, crit = ATK.crit, sprint = n === 1 && ATK.sprint, d0 = m && m.hp, r = _am.apply(this, arguments);
+    if (m && !m.dead && m.v && sprint && m.type !== 'golem'){ m.v.x *= 1.45; m.v.z *= 1.45; }
+    if (m && m.p) try { cbLanded({ x: m.p.x, y: m.p.y - (m.def ? m.def.h : 1) * .5, z: m.p.z }, n, crit, Math.max(1, Math.round((d0 || 0) - (m.hp || 0))) || null, true); } catch (e){}
+    ATK.crit = false; return r;
   };
 }
-/* the buffered click lands the moment the cooldown is over, if they're still in reach */
+/* combo-breakers that aren't a click: your target is gone, got away, or someone died */
 setInterval(() => {
-  const w = ATK.want; if (!w) return;
-  const now = performance.now();
-  if (now - ATK.wantT > ATK_BUF){ ATK.want = null; return; }
-  if (now - ATK.last < ATK_CD || !started || modal || chatOpen || SURV.dead) return;
-  ATK.want = null;
-  try {
-    const p = w.cur || w.p; if (!p || !atkAlive(w)) return;
-    if (!canHit(p, w.cur ? 1.8 : (w.def ? w.def.h : 1), w.cur ? .35 : (w.def ? w.def.w / 2 : .4))) return;
-    if (w.cur) attackPlayer(w); else attackMob(w);
-  } catch (e){}
-}, 16);
+  if (!ATK.target) return;
+  const t = ATK.target, p = t.cur || t.p;
+  if (SURV.dead || !started || !atkAlive(t) || !p || Math.hypot(p.x - pos.x, p.z - pos.z) > 12) comboBreak();
+}, 200);
 /* getting hit breaks your own combo */
-{ const _oh = onHit; onHit = function(msg){ const d = msg && msg.data || {}; if (NET.myPeer && d.to === NET.myPeer && !msg.sameTab) ATK.combo = 0; return _oh.apply(this, arguments); }; }
+{ const _oh = onHit; onHit = function(msg){ const d = msg && msg.data || {}; const r = _oh.apply(this, arguments); if (r === true) comboBreak(); return r; }; }
 /* hit sparks share one material and stop piling up, so fast fights don't slow the game down */
 {
   const hitMat = new THREE.MeshBasicMaterial({ color: 0xff3a4a });
@@ -13949,6 +13968,8 @@ if (isTouch){
       if (targetMob){ if (!interactMob(targetMob)) attackMob(targetMob); return; }
       const o = tapTarget(touchAim.x, touchAim.y);
       if (o){ if (o.m){ if (!interactMob(o.m)) attackMob(o.m); } else attackPlayer(o.a); return; }
+      /* mid-fight, a tap on nobody is a swing that misses (it doesn't drop a block) */
+      if (ATK.combo && atkReady()){ atkMiss(); return; }
     }
     return _pb.apply(this, arguments);
   };
@@ -14142,7 +14163,7 @@ function pjTargets(){ return [...mobs.filter(m => !m.dead).map(m => ({ m, p: m.p
 let pjHitId = 0, HIT_W = null;   /* what the thing that hit them was thrown or shot with (for the kill feed) */
 function sendHit(a, dmg, kx, kz, up, kb){
   if (!NET.wroom || !pvpOn()) return;
-  NET.wroom.presence({ h: [a.peer, Date.now() + Math.random() + (++pjHitId) * 1e-6, dmg, +kx.toFixed(3), +kz.toFixed(3), up || 0, kb || 1, HIT_W || 'fist'] }).catch(() => {});
+  NET.wroom.presence({ hit: [a.peer, Date.now() + Math.random() + (++pjHitId) * 1e-6, dmg, +kx.toFixed(3), +kz.toFixed(3), up || 0, kb || 1, HIT_W || 'fist', 0, 0, 1] }).catch(() => {});
 }
 function sendArea(kind, x, y, z, arg){ if (!NET.wroom) return; NET.wroom.presence({ fx: [Date.now() + Math.random(), kind, +x.toFixed(2), +y.toFixed(2), +z.toFixed(2), arg == null ? null : arg, HIT_W || null] }).catch(() => {}); }
 function fxRing(col){ try { fxBurst(pos.x, pos.y + 1, pos.z, { n: 12, color: col, speed: 2.4, up: 1.6, size: .16, life: .6, tex: 'spark', grav: 2 }); } catch (e){} }
@@ -16968,9 +16989,23 @@ function poseRig(rig, st, o, dt){
     ary = -lift * .5 * w;
     al += (-.2 - al) * w * .45;
   }
+  /* crouching: the body bends forward from the hips, legs step back a little, arms come forward, the head stays
+     looking ahead, and while you hold it there's a slow little bob */
+  st.cr = easeTo(st.cr || 0, o.crouch ? 1 : 0, 10, dt);
+  const C = st.cr;
+  /* got hit: the body jerks back for a moment and the arms fling out a little */
+  const Hk = st.hurt || 0; if (Hk > 0) st.hurt = Math.max(0, Hk - dt * 4.5);
+  const hk = Hk * Hk;
+  if (hk > .001){ al -= .5 * hk; ar -= .5 * hk; alz += .25 * hk; arz -= .25 * hk; }
+  if (C > .001 || hk > .001){
+    const bobC = Math.sin(st.t * 2.2) * .025 * C * idle;
+    ll = ll * (1 - .45 * C) + .2 * C; lr = lr * (1 - .45 * C) + .2 * C;
+    al += .1 * C; ar += .1 * C;
+    if (rig.up){ rig.up.rotation.x = .5 * C + bobC - .32 * hk; rig.up.position.y = .68 - .1 * C; rig.up.position.z = -.06 * C; }
+  } else if (rig.up && (rig.up.rotation.x || rig.up.position.z)){ rig.up.rotation.x = 0; rig.up.position.y = .68; rig.up.position.z = 0; }
   rig.ll.rotation.x = ll; rig.lr.rotation.x = lr;
   rig.al.rotation.set(al, 0, alz); rig.ar.rotation.set(ar, ary, arz);
-  if (rig.hp) rig.hp.rotation.x = -o.pitch * .8;
+  if (rig.hp) rig.hp.rotation.x = -o.pitch * .8 - .42 * C;
   if (rig.cape) rig.cape.rotation.x = Math.min(1.1, .12 + o.spd * .11 + A * .3);
   return twist;
 }
@@ -16981,7 +17016,7 @@ function animateMe(dt, hs, air){
   ANIM_ME.prevSw = swingT;
   if (ANIM_ME.sk >= 0){ ANIM_ME.sk += dt / SWING_DUR; if (ANIM_ME.sk >= 1) ANIM_ME.sk = -1; }
   const k = ANIM_ME.sk;
-  const tw = poseRig({ hp: headPivot, ll: legL, lr: legR, al: armL, ar: armR, cape: capeP }, ANIM_ME, { spd: hs, air, fly: flying, sprint: hs > PHYS.walkSpeed + .4, phase: walkPhase, swing: k, pitch }, dt);
+  const tw = poseRig({ hp: headPivot, ll: legL, lr: legR, al: armL, ar: armR, cape: capeP, up: upperP }, ANIM_ME, { spd: hs, air, fly: flying, sprint: hs > PHYS.walkSpeed + .4, phase: walkPhase, swing: k, pitch, crouch: crouchOn }, dt);
   ANIM_ME.twist = tw; player.rotation.y = yaw + Math.PI + tw;
   if (ANIM_ME.wasAir && !air && !flying) ANIM_ME.landT = .22;
   ANIM_ME.wasAir = air;
@@ -24773,6 +24808,254 @@ setTimeout(() => { try { lookCleanup(); } catch (e){} }, 12000);
     return r;
   };
 }
+/* ============ combat feel: hit sparks, critical hits, damage numbers, hit marker, combo counter, sounds,
+   screen shake, hit reactions, combat settings and the crouch button.
+   Every effect here comes from a real hit: one you landed (p40/p15), one on you (onHit), or one you saw (p8) ============ */
+const CB = { fx: true, crit: true, snd: true, shake: true, nums: true, ui: true, combo: true };
+try { Object.assign(CB, JSON.parse(localStorage.getItem('vx-combat') || '{}') || {}); } catch (e){}
+const cbSave = () => { try { localStorage.setItem('vx-combat', JSON.stringify(CB)); } catch (e){} };
+
+/* ---- particles (they use the game's shared particle pool, so lots of fights don't pile up objects) ---- */
+FXTEX.crit = fxCanvas(x => {
+  const g = x.createRadialGradient(32, 32, 0, 32, 32, 26); g.addColorStop(0, 'rgba(255,255,255,.95)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = g; x.fillRect(0, 0, 64, 64); x.fillStyle = '#fff'; x.fillRect(27, 4, 10, 56); x.fillRect(4, 27, 56, 10);
+});
+function cbBurst(x, y, z, crit, k){
+  if (!OPTS.particles) return;
+  k = k || 1; const busy = FX.length > FX_MAX * .6;
+  if (crit && CB.crit){
+    /* Minecraft-style critical stars spraying out, plus a quick flash */
+    const n = Math.round((busy ? 6 : 16) * k);
+    for (let i = 0; i < n; i++){
+      const a = Math.random() * Math.PI * 2, u = Math.random() * 2 - 1, r = Math.sqrt(1 - u * u), sp = 2.4 + Math.random() * 2.6;
+      fx('crit', x + Math.cos(a) * r * .3, y + u * .5, z + Math.sin(a) * r * .3, { color: Math.random() < .55 ? 0xfff1b8 : 0xe0b45a, vx: Math.cos(a) * r * sp, vy: u * sp * .6 + 2, vz: Math.sin(a) * r * sp, life: .45 + Math.random() * .3, s0: .2, s1: .04, grav: 7, drag: 2.2 });
+    }
+    if (!busy) fx('glow', x, y, z, { color: 0xffe08a, add: true, life: .16, s0: .5, s1: 1.5, a: .85 });
+  }
+  if (CB.fx){
+    const n = Math.round((busy ? 2 : 6) * k);
+    for (let i = 0; i < n; i++){
+      const a = Math.random() * Math.PI * 2, sp = 1.4 + Math.random() * 2;
+      fx('spark', x + (Math.random() - .5) * .3, y + (Math.random() - .5) * .4, z + (Math.random() - .5) * .3, { color: Math.random() < .6 ? 0xff6a50 : 0xffffff, add: true, vx: Math.cos(a) * sp, vy: 1.2 + Math.random() * 2, vz: Math.sin(a) * sp, life: .28 + Math.random() * .12, s0: .15, s1: .02, grav: 9 });
+    }
+  }
+}
+
+/* ---- sounds (one of each kind at a time, so fast fights don't turn into noise) ---- */
+const CB_SND = {};
+const cbSfx = (k, f, gap) => { if (!CB.snd || OPTS.sound === false) return; const now = performance.now(); if (now - (CB_SND[k] || 0) < (gap || 45)) return; CB_SND[k] = now; try { const S = window.__vxSfx; if (S && S._tone) f(S); } catch (e){} };
+function cbSwingSnd(){ cbSfx('sw', S => S._noise && S._noise(.08, 1600, .6, .08), 90); }
+function cbHitSnd(crit, n, v){
+  v = v == null ? 1 : v;
+  cbSfx('hit', S => { if (S._noise) S._noise(.05, 420, 1.1, .3 * v); S._tone(190, 95, .07, .15 * v, 'square'); });
+  if (crit) cbSfx('crit', S => { S._tone(1500, 2300, .07, .12 * v, 'triangle'); setTimeout(() => S._tone(2100, 3000, .05, .08 * v, 'sine'), 45); });
+  /* each hit in a combo rings a little higher (it keeps climbing, there are no special numbers) */
+  if (n >= 2) cbSfx('cmb', S => { const f = 420 * Math.pow(1.05, Math.min(n, 24)); S._tone(f, f * 1.25, .06, .09 * v, 'sine'); });
+}
+function cbThumpSnd(){ cbSfx('kb', S => { S._tone(130, 55, .14, .24, 'sine'); if (S._noise) S._noise(.06, 260, .8, .26); }); }
+
+/* ---- damage numbers that float up off whoever got hit (a small reused pool) ---- */
+const DN = [], DN_POOL = [], DN_FONT = (getComputedStyle(document.documentElement).getPropertyValue('--display') || 'sans-serif').trim();
+function dmgNum(x, y, z, n, crit){
+  if (!CB.nums || n == null) return;
+  if (DN.length >= 10){ const o = DN.shift(); scene.remove(o); DN_POOL.push(o); }
+  let s = DN_POOL.pop();
+  if (!s){ const cv = document.createElement('canvas'); cv.width = 128; cv.height = 64; s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), transparent: true, depthWrite: false, depthTest: false })); s.userData.cv = cv; s.renderOrder = 7; }
+  const cv = s.userData.cv, c = cv.getContext('2d'), t = (crit ? '' : '') + n + (crit ? '!' : '');
+  c.clearRect(0, 0, 128, 64); c.font = '900 ' + (crit ? 46 : 38) + 'px ' + DN_FONT; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.lineWidth = 9; c.strokeStyle = 'rgba(20,10,30,.9)'; c.strokeText(t, 64, 34); c.fillStyle = crit ? '#ffd24a' : '#ffffff'; c.fillText(t, 64, 34);
+  s.material.map.needsUpdate = true; s.material.opacity = 1;
+  s.position.set(x + (Math.random() - .5) * .5, y, z + (Math.random() - .5) * .5); s.scale.set(.8, .4, 1);
+  s.userData.t = 0; s.userData.crit = crit; scene.add(s); DN.push(s); cbRun();
+}
+
+/* ---- a quick red flash on whoever got hit ---- */
+const CB_FLASH = new Map();
+const cbFlashGeo = new THREE.BoxGeometry(.66, 1.86, .46), cbFlashMat = new THREE.MeshBasicMaterial({ color: 0xff2a2a, transparent: true, opacity: .4, depthWrite: false, blending: THREE.AdditiveBlending });
+function cbFlash(model, crouched){
+  if (!model) return;
+  let m = model.userData.cbF;
+  if (!m){ m = new THREE.Mesh(cbFlashGeo, cbFlashMat); m.position.y = .93; model.add(m); model.userData.cbF = m; }
+  m.scale.y = crouched ? .85 : 1; m.visible = true; CB_FLASH.set(m, .16); cbRun();
+}
+
+/* ---- screen: hit marker, CRITICAL!, the combo counter and the attack cooldown bar ---- */
+{
+  const st = document.createElement('style');
+  st.textContent = `
+#cbHud{position:fixed;left:50%;top:50%;width:0;height:0;z-index:3;pointer-events:none}
+body:not(.playing) #cbHud,body.inmodal #cbHud{display:none}
+#cbMark{position:absolute;left:-17px;top:-17px;width:34px;height:34px;opacity:0}
+#cbMark i{position:absolute;width:9px;height:3px;border-radius:2px;background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.45)}
+#cbMark i:nth-child(1){left:0;top:5px;transform:rotate(45deg)}#cbMark i:nth-child(2){right:0;top:5px;transform:rotate(-45deg)}
+#cbMark i:nth-child(3){left:0;bottom:5px;transform:rotate(-45deg)}#cbMark i:nth-child(4){right:0;bottom:5px;transform:rotate(45deg)}
+#cbMark.on{animation:cbmk .24s ease-out}
+#cbMark.crit i{background:#ffd24a}
+@keyframes cbmk{0%{opacity:1;transform:scale(.7)}35%{opacity:1;transform:scale(1.12)}100%{opacity:0;transform:scale(1.3)}}
+#cbCrit{position:absolute;left:0;top:-78px;transform:translateX(-50%);white-space:nowrap;font:700 24px var(--display);letter-spacing:.06em;color:#ffd24a;text-shadow:0 3px 0 #7a4a00,0 0 14px rgba(255,190,60,.55),-2px 0 0 #3a2200,2px 0 0 #3a2200,0 -2px 0 #3a2200;opacity:0}
+#cbCrit.on{animation:cbcr .75s cubic-bezier(.2,1.4,.4,1) forwards}
+@keyframes cbcr{0%{opacity:0;transform:translateX(-50%) scale(.5) rotate(-6deg)}18%{opacity:1;transform:translateX(-50%) scale(1.18) rotate(2deg)}35%{transform:translateX(-50%) scale(1) rotate(0)}75%{opacity:1}100%{opacity:0;transform:translateX(-50%) translateY(-10px) scale(.96)}}
+#cbCombo{position:absolute;left:40px;top:-26px;display:flex;align-items:center;gap:7px;padding:5px 11px 5px 7px;border-radius:12px;background:linear-gradient(135deg,rgba(255,182,72,.22),rgba(124,92,255,.25));border:1.5px solid rgba(255,182,72,.6);box-shadow:0 4px 14px rgba(0,0,0,.35);opacity:0;transform:scale(.8);transition:opacity .18s,transform .18s;transform-origin:left center}
+#cbCombo.show{opacity:1;transform:scale(1)}
+#cbCombo svg{width:22px;height:22px;color:#ffb648;flex:none;filter:drop-shadow(0 2px 0 rgba(0,0,0,.4))}
+#cbCombo b{font:700 28px/1 var(--display);color:#fff;text-shadow:0 2px 0 rgba(0,0,0,.45);font-variant-numeric:tabular-nums;min-width:.6em;text-align:center}
+#cbCombo small{font:800 10px/1.1 var(--body);letter-spacing:.14em;color:#ffd08a}
+#cbCombo.pop b{animation:cbpop .3s cubic-bezier(.2,1.6,.4,1)}
+@keyframes cbpop{0%{transform:scale(1.65);color:#ffd24a}100%{transform:scale(1);color:#fff}}
+#cbCool{position:absolute;left:-18px;top:20px;width:36px;height:4px;border-radius:3px;background:rgba(0,0,0,.45);overflow:hidden;opacity:0;transition:opacity .12s}
+#cbCool.on{opacity:1}
+#cbCool i{display:block;height:100%;width:0;background:linear-gradient(90deg,#ffb648,#ffe08a)}
+#cbHurt{position:fixed;top:0;right:0;bottom:0;left:0;z-index:2;pointer-events:none;opacity:0;background:radial-gradient(ellipse at center,rgba(255,0,0,0) 55%,rgba(220,20,30,.42) 100%)}
+#cbHurt.on{animation:cbhurt .38s ease-out}
+@keyframes cbhurt{0%{opacity:1}100%{opacity:0}}
+@media (max-width:700px){#cbCombo{left:30px;top:-22px;padding:4px 9px 4px 6px}#cbCombo b{font-size:23px}#cbCombo svg{width:18px;height:18px}#cbCrit{font-size:20px;top:-66px}}
+#bCrouch{width:62px;height:62px;right:max(118px,calc(env(safe-area-inset-right,0px) + 118px));bottom:calc(var(--sb) + 30px)}
+#bCrouch svg{width:30px;height:30px}
+#bCrouch span{display:none}
+#bCrouch.on{background:radial-gradient(circle at 50% 30%,rgba(255,196,96,.85),rgba(160,96,20,.7));border-color:#ffd08a}
+@media (max-width:600px){#bCrouch{bottom:calc(var(--sb) + 86px)}}
+body:not(.touch) #bCrouch{display:none}
+.sgrp.combat h3 i{background:rgba(255,90,90,.2);color:#ff9a9a}
+.sgrp.combat .cbnote{font:600 12px var(--body);color:var(--muted);margin:0}`;
+  document.head.appendChild(st);
+  const hud = document.createElement('div'); hud.id = 'cbHud'; hud.setAttribute('aria-hidden', 'true');
+  hud.innerHTML = '<div id="cbMark"><i></i><i></i><i></i><i></i></div><div id="cbCrit">CRITICAL!</div>'
+    + '<div id="cbCombo"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 3h4l9.3 9.3 1.4-1.4 1.4 1.4-1.4 1.4 2.1 2.1 1.4-1.4 1.4 1.4-2.8 2.8 1.4 1.4-1.4 1.4-1.4-1.4-2.8 2.8-1.4-1.4 1.4-1.4-2.1-2.1-1.4 1.4-1.4-1.4 1.4-1.4L3 7z"/></svg><span><b>0</b><small>COMBO</small></span></div>'
+    + '<div id="cbCool"><i></i></div>';
+  document.body.appendChild(hud);
+  const hurt = document.createElement('div'); hurt.id = 'cbHurt'; document.body.appendChild(hurt);
+  $('cbCombo').querySelector('span').style.cssText = 'display:grid;justify-items:center;gap:1px';
+}
+const replay = (el, cls) => { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); };
+/* the combo counter: shows from 2 hits in a row, pops every time it goes up, and goes away the moment the combo breaks */
+function cbCombo(n){
+  const el = $('cbCombo'); if (!el) return;
+  if (!CB.combo || n < 2){ el.classList.remove('show'); return; }
+  el.querySelector('b').textContent = n; el.classList.add('show'); replay(el, 'pop');
+}
+function cbMarker(crit){ if (!CB.ui) return; const m = $('cbMark'); m.classList.toggle('crit', !!crit); replay(m, 'on'); if (crit) replay($('cbCrit'), 'on'); }
+
+/* ---- what happens when a hit lands ---- */
+let camShake = 0;
+/* you hit someone (or a mob) */
+function cbLanded(p, n, crit, dmg, isMob, avatar){
+  if (!p) return;
+  const y = isMob ? p.y : p.y + 1.05;
+  cbBurst(p.x, y, p.z, crit, 1);
+  if (avatar){ cbFlash(avatar.model, avatar.cr); if (avatar.anim) avatar.anim.hurt = 1; }
+  dmgNum(p.x, y + .75, p.z, dmg, crit);
+  cbMarker(crit); cbCombo(n); cbHitSnd(crit, n);
+  if (crit && CB.shake) camShake = Math.max(camShake, .28);
+  cbRun();
+}
+/* someone hit you */
+function cbGotHit(att, dmg, crit){
+  cbBurst(pos.x, pos.y + 1.05, pos.z, crit, .8);
+  ANIM_ME.hurt = 1; cbFlash(player, crouchOn);
+  if (CB.ui) replay($('cbHurt'), 'on');
+  if (CB.shake) camShake = Math.max(camShake, crit ? .8 : .55);
+  cbThumpSnd(); if (crit) cbHitSnd(true, 0, .7);
+  cbRun();
+}
+/* you saw someone hit someone else */
+function cbSeenHit(peer, h){
+  const v = avatars.get(h[0]); if (!v || !v.cur) return;
+  const d = Math.hypot(v.cur.x - pos.x, v.cur.y - pos.y, v.cur.z - pos.z); if (d > 40) return;
+  const crit = +h[9] === 1, dmg = Math.round(+h[2] || 0) || null;
+  cbBurst(v.cur.x, v.cur.y + 1.05, v.cur.z, crit, d > 20 ? .5 : 1);
+  cbFlash(v.model, v.cr); if (v.anim) v.anim.hurt = 1;
+  if (d < 20) dmgNum(v.cur.x, v.cur.y + 1.8, v.cur.z, dmg, crit);
+  if (d < 14) cbHitSnd(crit, 0, Math.max(.2, 1 - d / 14));
+  cbRun();
+}
+
+/* ---- combos above other players' heads (each player sends their own count; it goes away when theirs breaks) ---- */
+function cbTag(n){
+  const cv = document.createElement('canvas'); cv.width = 160; cv.height = 56; const c = cv.getContext('2d');
+  c.fillStyle = 'rgba(30,18,50,.82)'; c.beginPath(); if (c.roundRect) c.roundRect(4, 6, 152, 44, 14); else c.rect(4, 6, 152, 44); c.fill();
+  c.strokeStyle = '#ffb648'; c.lineWidth = 3; c.stroke();
+  c.font = '700 26px ' + DN_FONT; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = '#ffd24a'; c.fillText(n + ' COMBO', 80, 29);
+  return new THREE.CanvasTexture(cv);
+}
+setInterval(() => {
+  for (const a of avatars.values()){
+    const want = CB.combo && a.cb >= 2 ? a.cb : 0;
+    if ((a._cbN || 0) === want) continue;
+    a._cbN = want;
+    let s = a.model && a.model.userData.cbTag;
+    if (!want){ if (s) s.visible = false; continue; }
+    if (!s){ s = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthWrite: false })); s.scale.set(.86, .3, 1); s.position.y = 2.55; s.renderOrder = 6; a.model.add(s); a.model.userData.cbTag = s; }
+    if (s.material.map) s.material.map.dispose();
+    s.material.map = cbTag(want); s.material.needsUpdate = true; s.visible = true;
+  }
+}, 120);
+
+/* ---- one little loop that only runs while something is moving (numbers, flashes, the cooldown bar) ---- */
+let cbRaf = 0, cbLast = 0;
+function cbRun(){ if (!cbRaf){ cbLast = performance.now(); cbRaf = requestAnimationFrame(cbTick); } }
+function cbTick(now){
+  cbRaf = 0; const dt = Math.min(.05, (now - cbLast) / 1000); cbLast = now; let busy = false;
+  for (let i = DN.length - 1; i >= 0; i--){
+    const s = DN[i], u = s.userData; u.t += dt;
+    s.position.y += dt * (u.crit ? 1.1 : .9); s.material.opacity = u.t < .4 ? 1 : Math.max(0, 1 - (u.t - .4) / .45);
+    const k = u.t < .12 ? .7 + u.t / .12 * (u.crit ? .55 : .35) : (u.crit ? 1.25 : 1.05); s.scale.set(.8 * k, .4 * k, 1);
+    if (u.t > .85){ scene.remove(s); DN.splice(i, 1); DN_POOL.push(s); } else busy = true;
+  }
+  for (const [m, t] of CB_FLASH){ const r = t - dt; if (r <= 0){ m.visible = false; CB_FLASH.delete(m); } else { CB_FLASH.set(m, r); m.material.opacity = .4; busy = true; } }
+  if (camShake > 0) busy = true;
+  /* the attack cooldown bar under the crosshair */
+  const left = ATK_CD - (performance.now() - ATK.last), bar = $('cbCool');
+  if (CB.ui && left > 0 && ATK.last){ bar.classList.add('on'); bar.firstChild.style.width = Math.round((1 - left / ATK_CD) * 100) + '%'; busy = true; }
+  else bar.classList.remove('on');
+  if (busy) cbRaf = requestAnimationFrame(cbTick);
+}
+{ const _g = atkGate; atkGate = function(){ const r = _g.apply(this, arguments); if (r) cbRun(); return r; }; }
+
+/* ---- armor on the chest bends with the body when crouching (it lives on the upper body) ---- */
+{
+  const _dr = dressRig;
+  dressRig = function(rig, body, A){
+    const up = body && body.children ? body.children.find(c => c.name === 'vxUpper') : null;
+    if (up) for (const c of [...up.children]) if (c.userData && c.userData.arm){ up.remove(c); if (c.geometry) c.geometry.dispose(); }
+    const r = _dr.apply(this, arguments);
+    if (up) for (const c of [...body.children]) if (c.userData && c.userData.arm){ body.remove(c); c.position.y -= .68; up.add(c); }
+    return r;
+  };
+}
+
+/* ---- the crouch button on touch screens: tap to crouch, tap again to stand ---- */
+{
+  const b = document.createElement('button'); b.className = 'tbtn'; b.id = 'bCrouch'; b.type = 'button'; b.setAttribute('aria-label', 'Crouch'); b.setAttribute('aria-pressed', 'false');
+  b.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="13" cy="4.5" r="2.4" fill="currentColor"/><path d="M12.5 8.2l-3.2 4.1 3.9 1.8-1.4 5.4M9.3 12.3l-3.2 1.4M13.2 14.1l3.6.3 1.4 4.6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>CROUCH</span>';
+  const tb = $('touch'); if (tb) tb.appendChild(b);
+  const set = on => { crouchTouch = on; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); };
+  b.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); set(!crouchTouch); });
+  b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); });
+  /* hidden while flying (the fly-down button sits there), and it lets go when you leave the game */
+  setInterval(() => { b.hidden = flying || !started; if (!started && crouchTouch) set(false); }, 250);
+}
+
+/* ---- settings: a Combat group ---- */
+{
+  const set = document.querySelector('#settings .set'), after = set && set.querySelector('.sgrp.play');
+  if (set){
+    const g = document.createElement('section'); g.className = 'sgrp combat';
+    g.innerHTML = '<h3><i><svg viewBox="0 0 24 24"><path fill="currentColor" d="M3 3h4l9.3 9.3 1.4-1.4 1.4 1.4-1.4 1.4 2.1 2.1 1.4-1.4 1.4 1.4-2.8 2.8 1.4 1.4-1.4 1.4-1.4-1.4-2.8 2.8-1.4-1.4 1.4-1.4-2.1-2.1-1.4 1.4-1.4-1.4 1.4-1.4L3 7z"/></svg></i>Combat</h3>';
+    const rows = [['fx', 'Hit particles', 'Little sparks when a hit lands'], ['crit', 'Critical hit particles', 'The star burst on a critical hit'], ['snd', 'Hit sounds', 'Swings, hits, critical hits and combos'],
+      ['shake', 'Screen shake', 'The screen shakes when you get hit'], ['nums', 'Damage numbers', 'Numbers that float up when someone gets hit'], ['ui', 'Combat HUD', 'Hit marker, CRITICAL! and the attack cooldown bar'], ['combo', 'Combo counter', 'Your combo next to the crosshair, and other players\' combos above their heads']];
+    for (const [k, t, sub] of rows){
+      const l = document.createElement('label'); l.className = 'optrow'; l.innerHTML = '<span><b></b><small></small></span><input type="checkbox" class="tgl">';
+      l.querySelector('b').textContent = t; l.querySelector('small').textContent = sub;
+      const i = l.querySelector('input'); i.id = 'cbo_' + k; i.checked = !!CB[k];
+      i.addEventListener('change', () => { CB[k] = i.checked; cbSave(); if (k === 'combo') cbCombo(CB.combo ? ATK.combo : 0); });
+      g.appendChild(l);
+    }
+    const r = document.createElement('div'); r.className = 'srow'; r.innerHTML = '<span><b>Low-end device?</b><small>Turn off the heavy effects so fights stay smooth</small></span><button type="button" class="sbtn">Turn off</button>';
+    r.querySelector('button').addEventListener('click', e => { for (const k of ['fx', 'crit', 'shake', 'nums']){ CB[k] = false; const i = $('cbo_' + k); if (i) i.checked = false; } cbSave(); e.target.textContent = 'Done!'; });
+    g.appendChild(r);
+    if (after) after.after(g); else set.appendChild(g);
+  }
+}
 /* ============ boot & frame loop ============ */
 newWorld(DEFAULT_SEED); syncSettings(); setTimeout(hideLoader, 300); $('ldBar').style.width = '100%'; resize(); selectSlot(0); $('itemName').style.opacity = 0;
 let perfEma = 1 / 60, perfT = 0;
@@ -24814,7 +25097,8 @@ function frame(now){
 
   /* camera */
   /* camera follows tightly: instant in the air, quick smoothing only for stepping up blocks */
-  { const ty = rpos.y + EYE; camY = (!onGround || flying || Math.abs(ty - camY) > 1.2) ? ty : camY + (ty - camY) * Math.min(1, dt * 28); }
+  crouchK += ((crouchOn ? 1 : 0) - crouchK) * Math.min(1, dt * 12);
+  { const ty = rpos.y + EYE - .28 * crouchK; camY = (!onGround || flying || Math.abs(ty - camY) > 1.2) ? ty : camY + (ty - camY) * Math.min(1, dt * 28); }
   headV.set(rpos.x, camY, rpos.z);
   L.set(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
   if (camMode === 0){
@@ -24883,6 +25167,8 @@ function frame(now){
     $('loading').hidden = !started || loadingLeft < 24;
     $('bDown').hidden = !flying;
   }
+  /* screen shake when a hit lands on you (p77) */
+  if (camShake > 0){ camShake = Math.max(0, camShake - dt * 3.2); const k = camShake * camShake * .14; camera.position.x += (Math.random() - .5) * k; camera.position.y += (Math.random() - .5) * k; camera.position.z += (Math.random() - .5) * k; }
   renderer.clear();
   if (started && !loadingNow){ renderer.render(scene, camera);
     if (camMode === 0){ renderer.clearDepth(); renderer.render(handScene, handCam); } }
