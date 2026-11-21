@@ -127,7 +127,8 @@ window.VOX_LOGINS = ['google'];
     };
     const signIn = async (id, pick) => {
       id = PID[id] ? id : 'google';
-      try { await auth.setPersistence(P.LOCAL); } catch (e){}   /* a real account stays signed in */
+      /* the login window has to open right away, in the same tap: Safari on iPad/iPhone blocks it if anything is
+         waited for first. (The account is moved to "stay signed in" storage on the reload right after, see start()) */
       try { await auth.signInWithPopup(prov(id, pick)); try { localStorage.setItem(ACCT, '1'); } catch (e){} location.reload(); return true; }
       catch (e){
         if (e && (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment' || e.code === 'auth/web-storage-unsupported')){ await auth.signInWithRedirect(prov(id, pick)); return true; }
