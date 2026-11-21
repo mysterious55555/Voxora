@@ -87,13 +87,14 @@ window.VOX_LOGINS = ['google'];
     } catch (e){}
     firebase.initializeApp(CFG);
     const auth = firebase.auth();
-    /* accounts stay signed in on this device until you sign out. Guests only last while their tab is open:
-       a refresh keeps the same guest, closing the tab ends it (the next visit is a brand new guest) */
-    const P = firebase.auth.Auth.Persistence;
+    /* signed in once = stays signed in on this device until you sign out (this is how it always worked: don't change it,
+       Google login on iPad depends on it). Guests still start fresh in every tab: their name and progress live in the tab only */
+    try { await auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL); } catch (e){}
     let loginErr = null;
     try { await auth.getRedirectResult(); } catch (e){ loginErr = e; }
     let user = await new Promise(r => { const off = auth.onAuthStateChanged(u => { off(); r(u); }); });
-    try { await auth.setPersistence(user && !user.isAnonymous ? P.LOCAL : P.SESSION); } catch (e){}
+    /* came back from Google's page but still not logged in: say so, instead of acting like nothing happened */
+    try { const t = +sessionStorage.getItem('vx-logintry') || 0; sessionStorage.removeItem('vx-logintry'); if (!loginErr && t && Date.now() - t < 10 * 60000 && (!user || user.isAnonymous)) loginErr = { code: 'auth/redirect-didnt-finish' }; } catch (e){}
     /* not logged in: join as a guest so you can still play online with people. Guests' progress isn't saved.
        (needs Firebase > Authentication > Sign-in method > Anonymous turned on; if it's off you just play offline) */
     /* not logged in: play as a guest. One guest id per browser (shared by its tabs, so opening a new tab never
@@ -123,15 +124,15 @@ window.VOX_LOGINS = ['google'];
       if (c === 'auth/network-request-failed') return 'No internet connection.';
       if (c === 'auth/unauthorized-domain') return 'This website isn\'t allowed to log in yet (Firebase > Authentication > Settings > Authorized domains).';
       if (c === 'auth/popup-blocked') return 'Your browser blocked the login window. Allow pop-ups and try again.';
+      if (c === 'auth/redirect-didnt-finish') return 'Google sent you back but the login didn\'t finish. Try again. If it keeps happening, turn off "Block Pop-ups" in Settings > Safari.';
       return 'Couldn\'t log in (' + (c.replace('auth/', '') || 'unknown') + '). Try again.';
     };
     const signIn = async (id, pick) => {
       id = PID[id] ? id : 'google';
-      /* the login window has to open right away, in the same tap: Safari on iPad/iPhone blocks it if anything is
-         waited for first. (The account is moved to "stay signed in" storage on the reload right after, see start()) */
+      /* the login window has to open right away, in the same tap: Safari on iPad/iPhone blocks it if anything is waited for first */
       try { await auth.signInWithPopup(prov(id, pick)); try { localStorage.setItem(ACCT, '1'); } catch (e){} location.reload(); return true; }
       catch (e){
-        if (e && (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment' || e.code === 'auth/web-storage-unsupported')){ await auth.signInWithRedirect(prov(id, pick)); return true; }
+        if (e && (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment' || e.code === 'auth/web-storage-unsupported')){ try { sessionStorage.setItem('vx-logintry', String(Date.now())); } catch (er){} await auth.signInWithRedirect(prov(id, pick)); return true; }
         if (e && (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request' || e.code === 'auth/user-cancelled')) return false;
         const er = new Error(why(e)); er.code = e && e.code; throw er;
       }
